@@ -1,0 +1,26 @@
+{
+  "name": "agent-orchestrator",
+  "version": "0.1.0",
+  "description": "Master orchestration agent + workflow engine for coordinating multiple Claude agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "demo": "tsx src/demo.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["orchestration", "agent", "workflow"],
+  "author": "Joshua Minton",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
