@@ -42,9 +42,9 @@ app.post('/command', async (req: Request, res: Response) => {
     }
 
     // Parse mission and initialize orchestrator
-    const workflow = await parseMission(command);
+    const workflow = parseMission(command);
     const orchestrator = new Orchestrator(workflow);
-    await orchestrator.initialize();
+    orchestrator.initialize();
 
     currentOrchestrator = orchestrator;
 
