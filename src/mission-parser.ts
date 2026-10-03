@@ -5,8 +5,9 @@
 
 import type { Phase, WorkflowDAG, ConditionalRule } from './types.js';
 
-export function parseMission(missionString: string): WorkflowDAG {
+export function parseMission(missionString: string): WorkflowDAG & { id: string; title: string } {
   const lowerMission = missionString.toLowerCase();
+  const id = 'mission-' + Date.now();
 
   // Hardcoded workflows for demo
   if (
@@ -14,15 +15,15 @@ export function parseMission(missionString: string): WorkflowDAG {
     lowerMission.includes('release') ||
     lowerMission.includes('production')
   ) {
-    return createDeploymentWorkflow(missionString);
+    return { ...createDeploymentWorkflow(missionString), id, title: missionString };
   } else if (lowerMission.includes('test') || lowerMission.includes('check')) {
-    return createTestingWorkflow(missionString);
+    return { ...createTestingWorkflow(missionString), id, title: missionString };
   } else if (lowerMission.includes('analyze') || lowerMission.includes('review')) {
-    return createAnalysisWorkflow(missionString);
+    return { ...createAnalysisWorkflow(missionString), id, title: missionString };
   }
 
   // Default: generic workflow
-  return createGenericWorkflow(missionString);
+  return { ...createGenericWorkflow(missionString), id, title: missionString };
 }
 
 function createDeploymentWorkflow(mission: string): WorkflowDAG {

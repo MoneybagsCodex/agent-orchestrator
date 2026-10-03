@@ -8,9 +8,10 @@ import { routeAllPhases } from './router.js';
 
 export class Orchestrator {
   private stateMachine: WorkflowStateMachine;
-  private workflow: WorkflowDAG;
+  workflow: WorkflowDAG;
   private agentAssignments: Map<string, Agent>;
   private riskLevel: RiskLevel = 'low';
+  executionEvents: Array<{ timestamp: string; type: string; message: string }> = [];
 
   constructor(workflow: WorkflowDAG) {
     this.workflow = workflow;
@@ -64,14 +65,9 @@ export class Orchestrator {
   /**
    * Get the next phases to execute
    */
-  getNextPhasesToExecute(): { ready: any[]; parallel: any[][] } {
+  getNextPhasesToExecute(): string[] {
     const readyPhases = this.stateMachine.getReadyPhases(this.workflow.edges);
-    const parallelizable = this.stateMachine.getParallelizablePhases(readyPhases);
-
-    return {
-      ready: readyPhases,
-      parallel: parallelizable,
-    };
+    return readyPhases.map((p: any) => p.id);
   }
 
   /**
@@ -96,6 +92,20 @@ export class Orchestrator {
       riskLevel: this.riskLevel,
       log: this.stateMachine.getLog(),
     };
+  }
+
+  /**
+   * Get progress
+   */
+  getProgress(): any {
+    return this.stateMachine.getProgress();
+  }
+
+  /**
+   * Get risk level
+   */
+  getRiskLevel(): RiskLevel {
+    return this.riskLevel;
   }
 
   private simulatePhaseExecution(phase: any): Record<string, any> {
