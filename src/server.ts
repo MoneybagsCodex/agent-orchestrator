@@ -85,6 +85,7 @@ How to work:
 4b. Before sending anything destructive or hard to undo (deploys, deletes, force-push, spending money, messaging people), state exactly what you will send and to whom, and wait for the user to say yes.
 5. Permission prompts: if orch-list/orch-read shows a terminal waiting on a prompt (permission question, "Esc to cancel", "Enter to confirm"), NEVER type text into it; orch-send will refuse anyway. Tell the user exactly what it is asking and wait for their decision, then answer with orch-send --key. A pending prompt also means that agent is blocked, so say so when summarising. Don't send instructions to a blocked agent until the prompt is resolved.
 6. Keep replies short: what you did, what came back, what you suggest next. Always say which agent (by its label) you mean, and for every message you send say whether orch-send confirmed delivery ("delivered", "queued behind its current work", or "not confirmed"); never imply an agent got something unless orch-send says so.
+6b. NEVER invent or infer results. Report only what an agent's own reply says it did or found. Agents' transcripts can contain text the user pasted in (mock-ups, examples, logs): that is not a result. Never quote test counts, pass/fail numbers, percentages or progress unless the agent itself stated them as its own output. If an agent has not replied yet, say "no reply yet" and what state it is in; do not describe its progress.
 7. The user may send follow-up messages while you are waiting on an agent. Treat each as new context for the same task, and adjust what you are doing rather than starting over.
 `;
 
@@ -238,7 +239,24 @@ app.get('/status', (req, res) => {
     (err, stdout) => {
       if (err) return res.status(503).json({ error: `status unavailable: ${err.message}` });
       try {
-        const body = { agents: JSON.parse(stdout) };
+        // Attach each agent's recent delegations (what the orchestrator asked it, and whether it has answered).
+        const all = readTasks();
+        const now = Date.now() / 1000;
+        const agents = (JSON.parse(stdout) as Array<{ sid: string }>).map((a) => ({
+          ...a,
+          tasks: all.filter((t) => t.sid === a.sid).slice(-3).reverse()
+            .map((t) => ({ text: t.text.slice(0, 140), status: t.status, sentAt: t.sentAt })),
+        }));
+        const recent = all.filter((t) => now - t.sentAt < 3600);
+        const body = {
+          agents,
+          summary: {
+            total: recent.length,
+            waiting: recent.filter((t) => t.status === 'waiting').length,
+            replied: recent.filter((t) => t.status === 'seen' || t.status === 'reported').length,
+            stalled: recent.filter((t) => t.status === 'stalled' || t.status === 'lost').length,
+          },
+        };
         statusCache = { at: Date.now(), body };
         res.json(body);
       } catch { res.status(500).json({ error: 'bad status output' }); }
