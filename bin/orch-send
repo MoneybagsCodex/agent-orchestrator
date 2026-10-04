@@ -79,6 +79,12 @@ if [[ "$SUBMIT" == "true" && "$TEXT" != /* ]]; then
     '. + [{id:$id, sid:$sid, pid:$pid, title:$title, text:$text, transcript:$tr, baseline:$base, sentAt:$at, status:"waiting"}]' "$tasks" > "$tmp" && mv "$tmp" "$tasks"
 fi
 
+# A message like "Step 2: do X" also becomes a plan step owned by this agent (best effort; never blocks the send).
+if [[ "$SUBMIT" == "true" && "$TEXT" != /* ]]; then
+  curl -s -m 5 -X POST "${ORCH_URL:-http://localhost:3003}/plan/auto" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg sid "$sid" --arg text "$TEXT" '{sid:$sid,text:$text}')" >/dev/null 2>&1 || true
+fi
+
 # Confirm delivery: for typed text, look for it appearing as a user message in the agent's transcript.
 if [[ "$SUBMIT" == "true" ]]; then
   pid=$(jq -r .pid <<<"$s"); tr=$(orch_transcript "$sid" "$pid"); needle="${TEXT:0:40}"

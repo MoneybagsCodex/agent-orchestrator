@@ -18,7 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { costsSummary, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { getAgents, costsSummary, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -354,6 +354,39 @@ const PLAN_FILE = path.join(SESSIONS_DIR, 'plan.json');
 const PLAN_STATUS = ['todo', 'active', 'done', 'blocked', 'decide'];
 const readPlan = () => { try { return JSON.parse(fs.readFileSync(PLAN_FILE, 'utf-8')); } catch { return null; } };
 const writePlan = (p: any) => { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(PLAN_FILE, JSON.stringify(p, null, 2)); };
+// ---- Auto-register plan steps from task messages ("Step 2: add a laser") ----
+// Called for both send paths: orch-send (keystrokes) and the orchestrator's SendMessage tool. One step per agent and step
+// number (re-sending the same step updates it instead of duplicating); each step chains after that agent's previous step.
+const STEP_RE = /^\s*(?:\*\*|#+\s*)?step\s+(\d{1,3})\s*[:.)\u2013\u2014-]\s*(.+)/is;
+export function parseStep(text: string): { n: number; title: string } | null {
+  const m = String(text).match(STEP_RE); if (!m) return null;
+  const title = m[2].split(/\n|(?<=[.!?])\s/)[0].replace(/\*\*/g, '').trim().slice(0, 100);
+  return title ? { n: Number(m[1]), title } : null;
+}
+async function registerStep(target: { sid?: string; to?: string }, text: string): Promise<string> {
+  const step = parseStep(text); if (!step) return 'not a step message';
+  const agents = await getAgents();
+  const t = target.to ?? '';
+  const a: any = agents.find((x: any) => (target.sid && x.sid === target.sid) || (t && (x.peer === t || x.name === t || t === `uds:/tmp/cc-socks/${x.pid}.sock`)));
+  if (!a) return 'target is not a known agent';
+  const owner = a.sid.slice(0, 8), id = `${owner}-s${step.n}`, nowS = Date.now() / 1000;
+  const plan = readPlan() ?? { title: 'Plan', nodes: [] as any[], updatedAt: nowS };
+  const existing = plan.nodes.find((n: any) => n.id === id);
+  if (existing) { existing.title = step.title; if (existing.status === 'done') { existing.status = 'active'; existing.statusAt = nowS; delete existing.doneAt; } }
+  else {
+    if (plan.nodes.length >= 40) return 'plan is full (40 steps)';
+    const prev = plan.nodes.filter((n: any) => n.sid === owner && typeof n.step === 'number' && n.step < step.n).sort((x: any, y: any) => y.step - x.step)[0];
+    plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, step: step.n, statusAt: nowS, startedAt: nowS });
+  }
+  plan.updatedAt = nowS; writePlan(plan);
+  return `${existing ? 'updated' : 'added'} plan step ${id}: ${step.title}`;
+}
+app.post('/plan/auto', async (req, res) => {
+  try { res.json({ ok: true, result: await registerStep({ sid: req.body?.sid, to: req.body?.to }, String(req.body?.text ?? '')) }); }
+  catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+host.on('sent-message', (m: { to: string; text: string }) => { registerStep({ to: m.to }, m.text).then((r) => { if (!r.startsWith('not a step')) console.log('[plan-auto]', r); }).catch(() => { /* best effort */ }); });
+
 app.get('/plan', (_req, res) => res.json({ plan: readPlan() }));
 app.post('/plan', (req, res) => {
   const { title, nodes } = req.body ?? {};

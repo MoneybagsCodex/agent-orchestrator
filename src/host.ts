@@ -202,6 +202,7 @@ export class OrchestratorHost extends EventEmitter {
         if (m) {
           this.upsertMessage({ msgId: m[1], to: info.to, text: info.text.slice(0, 300), sentAt: Math.floor(Date.now() / 1000), state: 'sent' });
           this.push({ kind: 'notice', state: 'sent', msgId: m[1], text: info.to });
+          this.emit('sent-message', { to: info.to, text: info.text });
         }
       }
     } else if (e.type === 'result') {
