@@ -2,36 +2,41 @@
 # Send input to a live terminal.
 # Usage: orch-send <label|sid-prefix> <text>          type text and press Enter
 #        orch-send <label|sid-prefix> --key <name>    press a key: enter esc up down left right tab y n ctrl-c
-# Prints what was sent; follow with orch-read after a few seconds to see the reply.
 
-set -e
-BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+source "$(dirname "$0")/_lib.sh"
 TARGET="${1:?Usage: orch-send <label|sid-prefix> <text> | --key <name>}"
 shift
 
 if [[ "$1" == "--key" ]]; then
   case "$2" in
-    enter) TEXT=""; SUBMIT=true ;;
-    esc) TEXT=$'\e'; SUBMIT=false ;;
-    up) TEXT=$'\e[A'; SUBMIT=false ;;
-    down) TEXT=$'\e[B'; SUBMIT=false ;;
-    right) TEXT=$'\e[C'; SUBMIT=false ;;
-    left) TEXT=$'\e[D'; SUBMIT=false ;;
-    tab) TEXT=$'\t'; SUBMIT=false ;;
-    ctrl-c) TEXT=$'\x03'; SUBMIT=false ;;
-    y|n) TEXT="$2"; SUBMIT=false ;;
+    enter) TEXT=$'\r' ;;
+    esc) TEXT=$'\e' ;;
+    up) TEXT=$'\e[A' ;; down) TEXT=$'\e[B' ;; right) TEXT=$'\e[C' ;; left) TEXT=$'\e[D' ;;
+    tab) TEXT=$'\t' ;;
+    ctrl-c) TEXT=$'\x03' ;;
+    y|n) TEXT="$2" ;;
     *) echo "unknown key: $2" >&2; exit 1 ;;
   esac
-  DESC="key $2"
+  SUBMIT=false; DESC="key $2"
 else
   TEXT="${1:?missing text}"; SUBMIT=true; DESC="\"$TEXT\""
 fi
 
-SID=$(curl -sf "$BRIDGE_URL/terminals?tail=1" | jq -r --arg t "$TARGET" '
-  [.sessions[] | select(.label == $t or .agent == $t or (.sid | startswith($t)))] as $m
-  | if ($m | length) == 1 then $m[0].sid else empty end')
-if [[ -z "$SID" ]]; then echo "NOT FOUND or AMBIGUOUS: $TARGET (run orch-list)" >&2; exit 1; fi
+s=$(orch_resolve "$TARGET") || exit 1
+sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s")
+
+# Never type a message into a terminal that is waiting on a permission/menu prompt: the text and the
+# Enter would land in the prompt (possibly approving something). Keys (--key) are exempt on purpose.
+if [[ "$SUBMIT" == "true" ]]; then
+  screen=$(orch_sessions 800 | jq -r --arg sid "$sid" '.[] | select(.sid == $sid) | .bufferTail' | orch_strip_ansi | tail -15)
+  if grep -qE "Esc to cancel|Enter to confirm|Tab to amend|Do you want to|don.t ask again|\(y/n\)|\[Y/n\]" <<<"$screen"; then
+    echo "REFUSED: '$label' is waiting on a prompt, so typing text would answer the prompt instead of reaching the agent." >&2
+    echo "Screen shows: $(grep -E 'Esc to cancel|Enter to confirm|Tab to amend|Do you want to|don.t ask again|\(y/n\)|\[Y/n\]' <<<"$screen" | tail -2 | tr -s ' ' | cut -c1-160)" >&2
+    echo "Tell the user what it is asking. Only after they decide, answer with: orch-send '$label' --key <y|n|enter|down|esc>." >&2
+    exit 3
+  fi
+fi
 
 BODY=$(jq -n --arg text "$TEXT" --argjson submit "$SUBMIT" '{text: $text, submit: $submit}')
-RESP=$(curl -s -X POST "$BRIDGE_URL/terminal/$SID/input" -H 'Content-Type: application/json' -d "$BODY")
-if [[ "$(echo "$RESP" | jq -r '.ok')" == "true" ]]; then echo "sent to $TARGET: $DESC"; else echo "FAILED: $RESP" >&2; exit 1; fi
+RESP=$(curl -s -X POST "$BRIDGE_URL/terminal/$sid/input" -H 'Content-Type: application/json' -d "$BODY")
+if [[ "$(echo "$RESP" | jq -r '.ok' 2>/dev/null)" == "true" ]]; then echo "sent to $label: $DESC"; else echo "FAILED: $RESP" >&2; exit 1; fi

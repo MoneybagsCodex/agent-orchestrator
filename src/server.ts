@@ -70,7 +70,7 @@ const ORCHESTRATOR_ROLE = `You are the user's master orchestrator. The user talk
 
 You can ONLY act through these commands (run them with Bash, exactly as written):
 - orch-list                          list live terminals: label, short id, uptime, last visible line
-- orch-read <label|id> [chars]       recent screen output of a terminal (default 3000 chars). Replies from that agent are the lines starting with a "⏺" marker; the end of the output is its current state (spinner/"thinking"/"esc to interrupt" = still working; an empty prompt box = idle/waiting).
+- orch-read <label|id> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
 - orch-send <label|id> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction)
 - orch-send <label|id> --key <k>     press a key (enter esc up down y n tab ctrl-c), e.g. to answer a permission or trust prompt
 - orch-wait <label|id> [seconds]     block until that terminal goes quiet after you sent something; then orch-read it
@@ -80,7 +80,7 @@ How to work:
 2. To delegate: orch-send the instruction, orch-wait, orch-read, then tell the user what that agent said or did, in your own words (not a raw screen dump). If it is still busy after the wait, say so and offer to check again.
 3. Many questions need no terminal at all (planning, clarifying, deciding what to ask which agent). Answer those directly and conversationally; keep earlier turns in mind.
 4. Before sending anything destructive or hard to undo (deploys, deletes, force-push, spending money, messaging people), state exactly what you will send and to whom, and wait for the user to say yes.
-5. When an agent is sitting on a permission prompt, tell the user what it is asking before you answer it, unless the user already told you to approve such things.
+5. Permission prompts: if orch-list/orch-read shows a terminal waiting on a prompt (permission question, "Esc to cancel", "Enter to confirm"), NEVER type text into it; orch-send will refuse anyway. Tell the user exactly what it is asking and wait for their decision, then answer with orch-send --key. A pending prompt also means that agent is blocked, so say so when summarising. Don't send instructions to a blocked agent until the prompt is resolved.
 6. Keep replies short: what you did, what came back, what you suggest next.
 `;
 
@@ -198,6 +198,49 @@ app.post('/chat', (req, res) => {
  * GET /health
  * Check if the orchestrator is running
  */
+/**
+ * GET /terminals?tail=N
+ * The bridge's live sessions with human labels merged in (cockpit panel names, then session
+ * metadata). Older bridges don't know labels, so the UI reads this instead of the bridge.
+ */
+app.get('/terminals', async (req, res) => {
+  const tail = parseInt(String(req.query.tail ?? '200'), 10) || 200;
+  try {
+    let r = await fetch(`${BRIDGE_URL}/terminals?tail=${tail}`);
+    if (!r.ok) r = await fetch(`${BRIDGE_URL}/terminals`); // old bridge: no ?tail=
+    const { sessions } = (await r.json()) as { sessions: Record<string, any>[] };
+
+    const names: Record<string, string> = {};
+    try {
+      const metaDir = path.join(STATE_DIR, 'session-metadata');
+      for (const f of fs.readdirSync(metaDir)) {
+        const m = JSON.parse(fs.readFileSync(path.join(metaDir, f), 'utf-8'));
+        if (m.sessionId && m.name) names[m.sessionId] = m.name;
+      }
+    } catch { /* no metadata */ }
+    try {
+      for (const a of JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'active-sessions.json'), 'utf-8'))) {
+        if (a.sid && a.label) names[a.sid] = a.label; // later entries win
+      }
+    } catch { /* no active-sessions */ }
+
+    // Older bridges return the raw pty tail; strip escape codes (column/forward moves stand in for spaces).
+    const clean = (t: string) =>
+      t.replace(/\x1b\[\d*[CG]/g, ' ').replace(/\x1b\[[0-9;?>]*[ -\/]*[@-~]/g, '').replace(/\x1b\][^\x07]*\x07/g, '')
+        .replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+
+    res.json({
+      sessions: sessions.map((s) => ({
+        ...s,
+        label: names[s.sid] || s.label || s.agent || String(s.sid).slice(0, 8),
+        bufferTail: clean(String(s.bufferTail ?? '')),
+      })),
+    });
+  } catch (e) {
+    res.status(503).json({ error: `bridge unreachable: ${(e as Error).message}` });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',

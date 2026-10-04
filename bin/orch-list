@@ -1,6 +1,16 @@
 #!/bin/bash
-# List live agent terminals: label, short sid, age, and the last visible line.
-BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
-curl -sf "$BRIDGE_URL/terminals?tail=400" | jq -r '
-  .sessions[] | "\(.label)\t\(.sid[0:8])\tup \((now - .startedAt/1000)/60 | floor)m\t\(.bufferTail | split("\n") | map(select(test("[A-Za-z]"))) | last // "" | .[0:100])"' \
-  | column -t -s $'\t'
+# List live agent terminals: label, short id, uptime, state, last visible line.
+source "$(dirname "$0")/_lib.sh"
+
+orch_sessions 400 | jq -c '.[]' | while read -r s; do
+  sid=$(jq -r .sid <<<"$s")
+  tr=$(orch_transcript "$sid")
+  if [[ -n "$tr" ]]; then
+    age=$(orch_age "$tr"); (( age < 10 )) && state="working" || state="idle ${age}s"
+  else
+    state="no-transcript"
+  fi
+  last=$(jq -r '.bufferTail' <<<"$s" | orch_strip_ansi | grep -E '[A-Za-z]' | tail -1 | cut -c1-80)
+  printf '%s\t%s\tup %sm\t%s\t%s\n' "$(jq -r .label <<<"$s")" "${sid:0:8}" \
+    "$(jq -r '((now - .startedAt/1000)/60 | floor)' <<<"$s")" "$state" "$last"
+done | column -t -s $'\t'

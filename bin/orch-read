@@ -1,17 +1,25 @@
 #!/bin/bash
-# Read the recent screen output of a live terminal.
-# Usage: orch-read <label|sid-prefix> [chars=3000]
-# Reads the bridge's live buffer (works for any engine), ANSI-stripped.
-# Look at the END of the output: that is the current state (spinner lines mean still working,
-# a prompt box with nothing after it means idle/finished).
+# Read what a terminal's agent has said/done recently.
+# Usage: orch-read <label|sid-prefix> [entries=8]
+# Uses the agent's conversation transcript when one exists (clean, complete); otherwise falls back to the live screen text.
 
-set -e
-BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
-TARGET="${1:?Usage: orch-read <label|sid-prefix> [chars]}"
-CHARS="${2:-3000}"
+source "$(dirname "$0")/_lib.sh"
+TARGET="${1:?Usage: orch-read <label|sid-prefix> [entries]}"
+N="${2:-8}"
+s=$(orch_resolve "$TARGET") || exit 1
+sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s")
+tr=$(orch_transcript "$sid")
 
-curl -sf "$BRIDGE_URL/terminals?tail=$CHARS" | jq -r --arg t "$TARGET" '
-  [.sessions[] | select(.label == $t or .agent == $t or (.sid | startswith($t)))] as $m
-  | if ($m | length) == 0 then "NOT FOUND: \($t)" | halt_error(1)
-    elif ($m | length) > 1 then "AMBIGUOUS: \($t) matches \($m | map("\(.label) (\(.sid[0:8]))") | join(", "))" | halt_error(2)
-    else $m[0] | "== \(.label) (\(.sid[0:8])) ==\n\(.bufferTail)" end'
+if [[ -n "$tr" ]]; then
+  age=$(orch_age "$tr")
+  echo "== $label (${sid:0:8}) — $( (( age < 10 )) && echo "WORKING (activity ${age}s ago)" || echo "idle for ${age}s") =="
+  jq -r 'select((.type == "user" or .type == "assistant") and (.isSidechain | not))
+    | (.message.content | if type == "string" then .
+        else map(if .type == "text" then .text
+                 elif .type == "tool_use" then "[tool: \(.name) \((.input.command // .input.file_path // .input.pattern // "") | tostring | .[0:80])]"
+                 else empty end) | join("\n") end) as $t
+    | select($t != "") | "\(.type | ascii_upcase): \($t | .[0:1500])"' "$tr" | tail -n "$N"
+else
+  echo "== $label (${sid:0:8}) — no transcript yet; live screen text (may be short/noisy) =="
+  jq -r .bufferTail <<<"$s" | orch_strip_ansi | grep -E '[A-Za-z0-9]' | tail -20
+fi
