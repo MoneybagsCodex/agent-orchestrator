@@ -202,7 +202,7 @@ function runHeadlines() {
 // ---------------------------------------------------------------- per-agent token counts (from the transcript's own usage fields)
 interface TokRow { at: number; inp: number; out: number; cr: number }   // inp = fresh input + cache writes; cr = cache reads
 const tokCache = new Map<string, { offset: number; rows: Map<string, TokRow> }>();
-export interface TokenStats { input: number; output: number; cacheRead: number; total: number; perHour: number; turnTotal: number; messages: number }
+export interface TokenStats { input: number; output: number; cacheRead: number; total: number; perHour: number; turnTotal: number; messages: number; context: number }
 export function tokensFor(file: string, turnStart: number): TokenStats {
   const st = fs.statSync(file);
   let c = tokCache.get(file);
@@ -223,9 +223,11 @@ export function tokensFor(file: string, turnStart: number): TokenStats {
     }
   }
   const now = Date.now() / 1000;
-  const t: TokenStats = { input: 0, output: 0, cacheRead: 0, total: 0, perHour: 0, turnTotal: 0, messages: c.rows.size };
+  const t: TokenStats = { input: 0, output: 0, cacheRead: 0, total: 0, perHour: 0, turnTotal: 0, messages: c.rows.size, context: 0 };
+  let latest = -1;
   for (const r of c.rows.values()) {
     const all = r.inp + r.out + r.cr;
+    if (r.at >= latest) { latest = r.at; t.context = r.inp + r.cr; }   // what the newest call sent: fresh input + cache write + cache read
     t.input += r.inp; t.output += r.out; t.cacheRead += r.cr; t.total += all;
     if (now - r.at < 3600) t.perHour += all;
     if (turnStart && r.at >= turnStart) t.turnTotal += all;
