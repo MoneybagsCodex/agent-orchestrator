@@ -1,7 +1,6 @@
 #!/bin/bash
-# List all live agent terminals from the bridge
-# Output: JSON array of {sid, agent, label, cwd, pid, startedAt}
-
+# List live agent terminals: label, short sid, age, and the last visible line.
 BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
-
-curl -s "$BRIDGE_URL/terminals" | jq '.sessions // []'
+curl -sf "$BRIDGE_URL/terminals?tail=400" | jq -r '
+  .sessions[] | "\(.label)\t\(.sid[0:8])\tup \((now - .startedAt/1000)/60 | floor)m\t\(.bufferTail | split("\n") | map(select(test("[A-Za-z]"))) | last // "" | .[0:100])"' \
+  | column -t -s $'\t'

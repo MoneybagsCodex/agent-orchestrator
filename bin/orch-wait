@@ -1,0 +1,25 @@
+#!/bin/bash
+# Block until a terminal's output has been unchanged for 5s (agent finished or is waiting for input),
+# or until the max wait is hit. Usage: orch-wait <label|sid-prefix> [max-seconds=90]
+# Prints "idle" or "still-busy (timeout)". Then run orch-read.
+
+BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+TARGET="${1:?Usage: orch-wait <label|sid-prefix> [max-seconds]}"
+MAX="${2:-90}"
+
+snap() {
+  curl -sf "$BRIDGE_URL/terminals?tail=600" | jq -r --arg t "$TARGET" '
+    [.sessions[] | select(.label == $t or .agent == $t or (.sid | startswith($t)))][0].bufferTail // empty' \
+    | grep -v -E '(thinking|esc to interrupt|\([0-9]+s ·)' | tr -d '✻✽✶✳✢· ' | md5
+}
+
+start=$(date +%s); last=$(snap); [[ -z "$last" ]] && { echo "NOT FOUND: $TARGET" >&2; exit 1; }
+stable=0; active=0
+while (( $(date +%s) - start < MAX )); do
+  sleep 1; cur=$(snap)
+  if [[ "$cur" == "$last" ]]; then stable=$((stable+1)); else stable=0; active=1; last="$cur"; fi
+  # Wait up to 20s for the agent to start doing something before concluding nothing is happening.
+  (( active == 1 && stable >= 6 )) && { echo idle; exit 0; }
+  (( active == 0 && stable >= 20 )) && { echo "idle (no activity seen)"; exit 0; }
+done
+echo "still-busy (timeout after ${MAX}s)"

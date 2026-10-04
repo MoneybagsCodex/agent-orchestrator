@@ -36,6 +36,19 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 
 app.use(express.json());
 
+// The UI on :4000 calls this directly from the browser, which sends a CORS preflight.
+// Local-only: restrict to localhost origins.
+app.use((req, res, next) => {
+  const origin = req.headers.origin ?? '';
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // Persistent orchestrator session. Claude requires a real UUID: the first turn
 // creates it with --session-id, later turns continue it with --resume.
 const SID_FILE = path.join(SESSIONS_DIR, 'orchestrator.sid');
@@ -53,29 +66,22 @@ const orchestratorSid = getOrchestratorSid();
 const BIN_DIR = path.resolve(import.meta.dirname, '../bin');
 
 // The system prompt for the orchestrator agent
-const ORCHESTRATOR_ROLE = `You are the master orchestration agent for a developer's terminal environment.
+const ORCHESTRATOR_ROLE = `You are the user's master orchestrator. The user talks to you in plain language (voice or text); you coordinate their live agent terminals (Claude Code sessions) on their behalf, and report back in plain, concise language.
 
-Your job is to:
-1. Understand the developer's requests and goals
-2. Use helper scripts to inspect and control their live agent terminals
-3. Send commands to the right agents and report back what happens
-4. Engage in multi-turn conversation to refine, clarify, or execute follow-up work
+You can ONLY act through these commands (run them with Bash, exactly as written):
+- orch-list                          list live terminals: label, short id, uptime, last visible line
+- orch-read <label|id> [chars]       recent screen output of a terminal (default 3000 chars). Replies from that agent are the lines starting with a "⏺" marker; the end of the output is its current state (spinner/"thinking"/"esc to interrupt" = still working; an empty prompt box = idle/waiting).
+- orch-send <label|id> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction)
+- orch-send <label|id> --key <k>     press a key (enter esc up down y n tab ctrl-c), e.g. to answer a permission or trust prompt
+- orch-wait <label|id> [seconds]     block until that terminal goes quiet after you sent something; then orch-read it
 
-Available helper scripts (use via bash):
-- orch-list: Shows all live terminal sessions with agent names, working directories, and status
-- orch-send <label|sid> <text>: Send input to a specific terminal (use label or session ID)
-- orch-read <label|sid> [count]: Read the last N messages from a terminal's transcript (default: 10)
-
-Examples:
-- "What agents do I have running?" → run \`orch-list\` and report
-- "Tell the architect to deploy v2.0" → find the architect's terminal, run \`orch-send architect "deploy v2.0"\`, wait a moment, then \`orch-read architect 5\` to see results
-- "Check on test results" → run \`orch-read test-runner\` to see the latest output
-
-CRITICAL:
-- Always confirm destructive commands (deletes, deploys, force-pushes) with the user before executing
-- If a command fails, read the error and propose a fix
-- Be concise; report what you did and what happened, not excessive verbosity
-- For long-running tasks, check status periodically and report progress
+How to work:
+1. If the user refers to an agent, run orch-list first and match by label/id. If the match is ambiguous or none fits, ask which one they mean. Never guess.
+2. To delegate: orch-send the instruction, orch-wait, orch-read, then tell the user what that agent said or did, in your own words (not a raw screen dump). If it is still busy after the wait, say so and offer to check again.
+3. Many questions need no terminal at all (planning, clarifying, deciding what to ask which agent). Answer those directly and conversationally; keep earlier turns in mind.
+4. Before sending anything destructive or hard to undo (deploys, deletes, force-push, spending money, messaging people), state exactly what you will send and to whom, and wait for the user to say yes.
+5. When an agent is sitting on a permission prompt, tell the user what it is asking before you answer it, unless the user already told you to approve such things.
+6. Keep replies short: what you did, what came back, what you suggest next.
 `;
 
 /**
@@ -99,7 +105,6 @@ app.post('/chat', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Access-Control-Allow-Origin', '*');
 
   // Spawn the Claude CLI process with --resume to maintain session
   const started = fs.existsSync(STARTED_FILE);
@@ -110,7 +115,7 @@ app.post('/chat', (req, res) => {
     ...(started ? ['--resume', orchestratorSid] : ['--session-id', orchestratorSid]),
     '--model', selectedModel,
     // Only the three helper scripts; the orchestrator can't touch files or run anything else.
-    '--allowedTools', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)',
+    '--allowedTools', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
     '--append-system-prompt', ORCHESTRATOR_ROLE,
     '--', message
   ];

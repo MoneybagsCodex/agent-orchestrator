@@ -1,44 +1,37 @@
 #!/bin/bash
-# Send input to a terminal by label or sid
-# Usage: orch-send <label|sid> <text> [submit=true]
-#
-# If the argument looks like a session ID (contains dashes), use it directly.
-# Otherwise, try to find it by label in the session list.
+# Send input to a live terminal.
+# Usage: orch-send <label|sid-prefix> <text>          type text and press Enter
+#        orch-send <label|sid-prefix> --key <name>    press a key: enter esc up down left right tab y n ctrl-c
+# Prints what was sent; follow with orch-read after a few seconds to see the reply.
 
 set -e
-
 BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+TARGET="${1:?Usage: orch-send <label|sid-prefix> <text> | --key <name>}"
+shift
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: orch-send <label|sid> <text> [submit=true]" >&2
-  exit 1
-fi
-
-TARGET="$1"
-TEXT="$2"
-SUBMIT="${3:-true}"
-
-# If target looks like a session ID (has dashes), use it directly
-if [[ "$TARGET" == *-* ]]; then
-  SID="$TARGET"
+if [[ "$1" == "--key" ]]; then
+  case "$2" in
+    enter) TEXT=""; SUBMIT=true ;;
+    esc) TEXT=$'\e'; SUBMIT=false ;;
+    up) TEXT=$'\e[A'; SUBMIT=false ;;
+    down) TEXT=$'\e[B'; SUBMIT=false ;;
+    right) TEXT=$'\e[C'; SUBMIT=false ;;
+    left) TEXT=$'\e[D'; SUBMIT=false ;;
+    tab) TEXT=$'\t'; SUBMIT=false ;;
+    ctrl-c) TEXT=$'\x03'; SUBMIT=false ;;
+    y|n) TEXT="$2"; SUBMIT=false ;;
+    *) echo "unknown key: $2" >&2; exit 1 ;;
+  esac
+  DESC="key $2"
 else
-  # Try to find by label
-  SID=$(curl -s "$BRIDGE_URL/terminals" | jq -r ".sessions[] | select(.label == \"$TARGET\" or .agent == \"$TARGET\") | .sid" | head -1)
-
-  if [[ -z "$SID" ]]; then
-    echo "❌ Terminal not found: $TARGET" >&2
-    exit 1
-  fi
+  TEXT="${1:?missing text}"; SUBMIT=true; DESC="\"$TEXT\""
 fi
 
-# Send input to the terminal
-RESPONSE=$(curl -s -X POST "$BRIDGE_URL/terminal/$SID/input" \
-  -H "Content-Type: application/json" \
-  -d "{\"text\": $(echo "$TEXT" | jq -Rs '.'), \"submit\": $SUBMIT}")
+SID=$(curl -sf "$BRIDGE_URL/terminals?tail=1" | jq -r --arg t "$TARGET" '
+  [.sessions[] | select(.label == $t or .agent == $t or (.sid | startswith($t)))] as $m
+  | if ($m | length) == 1 then $m[0].sid else empty end')
+if [[ -z "$SID" ]]; then echo "NOT FOUND or AMBIGUOUS: $TARGET (run orch-list)" >&2; exit 1; fi
 
-if echo "$RESPONSE" | jq -e '.ok' > /dev/null 2>&1; then
-  echo "✓ Sent to $TARGET"
-else
-  echo "❌ Failed to send: $(echo "$RESPONSE" | jq -r '.error // "unknown error"')" >&2
-  exit 1
-fi
+BODY=$(jq -n --arg text "$TEXT" --argjson submit "$SUBMIT" '{text: $text, submit: $submit}')
+RESP=$(curl -s -X POST "$BRIDGE_URL/terminal/$SID/input" -H 'Content-Type: application/json' -d "$BODY")
+if [[ "$(echo "$RESP" | jq -r '.ok')" == "true" ]]; then echo "sent to $TARGET: $DESC"; else echo "FAILED: $RESP" >&2; exit 1; fi

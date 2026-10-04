@@ -1,62 +1,17 @@
 #!/bin/bash
-# Read terminal output from a session's transcript
-# Usage: orch-read <label|sid> [count=10]
-#
-# Reads the last N messages from a terminal's JSONL transcript
-# Output includes: role (user/assistant), content snippet, timestamp
+# Read the recent screen output of a live terminal.
+# Usage: orch-read <label|sid-prefix> [chars=3000]
+# Reads the bridge's live buffer (works for any engine), ANSI-stripped.
+# Look at the END of the output: that is the current state (spinner lines mean still working,
+# a prompt box with nothing after it means idle/finished).
 
 set -e
+BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+TARGET="${1:?Usage: orch-read <label|sid-prefix> [chars]}"
+CHARS="${2:-3000}"
 
-TARGET="${1:-.}"
-COUNT="${2:-10}"
-
-OPERATOR_STATE="${OPERATOR_STATE_DIR:-$HOME/.operator-state}"
-
-# If target looks like a session ID (has dashes), use it directly
-if [[ "$TARGET" == *-* ]]; then
-  SID="$TARGET"
-else
-  # Try to find by label — scan all session metadata files
-  SID=$(find "$OPERATOR_STATE/session-metadata" -name "*.json" 2>/dev/null | while read f; do
-    LABEL=$(jq -r '.label // empty' "$f" 2>/dev/null)
-    if [[ "$LABEL" == "$TARGET" ]]; then
-      basename "$f" .json
-      break
-    fi
-  done)
-
-  if [[ -z "$SID" ]]; then
-    echo "❌ Terminal not found: $TARGET" >&2
-    exit 1
-  fi
-fi
-
-# Find the transcript file for this session
-# Claude stores at ~/.claude/projects/<project>/<sid>.jsonl
-TRANSCRIPT_CANDIDATES=(
-  "$OPERATOR_STATE/../.claude/projects/*/$SID.jsonl"
-  "$HOME/.claude/projects/*/$SID.jsonl"
-)
-
-TRANSCRIPT=""
-for pattern in "${TRANSCRIPT_CANDIDATES[@]}"; do
-  matches=$(ls $pattern 2>/dev/null || true)
-  if [[ -n "$matches" ]]; then
-    TRANSCRIPT="$matches"
-    break
-  fi
-done
-
-if [[ -z "$TRANSCRIPT" ]]; then
-  echo "⚠️  No transcript found for $SID (maybe no messages yet)" >&2
-  exit 0
-fi
-
-# Read the last N lines and parse as JSONL
-echo "📄 Last $COUNT messages from $SID:"
-echo ""
-
-tail -n "$COUNT" "$TRANSCRIPT" | jq -r '.role as $role | "\($role | ascii_upcase | if . == "USER" then "👤" elif . == "ASSISTANT" then "🤖" else "•" end) \(.timestamp | todate[0:19]): \(.content[0:120])\(if (.content | length) > 120 then "…" else "" end)"' 2>/dev/null || tail -n "$COUNT" "$TRANSCRIPT" | head -c 500
-
-echo ""
-echo "✓ See full transcript: $TRANSCRIPT"
+curl -sf "$BRIDGE_URL/terminals?tail=$CHARS" | jq -r --arg t "$TARGET" '
+  [.sessions[] | select(.label == $t or .agent == $t or (.sid | startswith($t)))] as $m
+  | if ($m | length) == 0 then "NOT FOUND: \($t)" | halt_error(1)
+    elif ($m | length) > 1 then "AMBIGUOUS: \($t) matches \($m | map("\(.label) (\(.sid[0:8]))") | join(", "))" | halt_error(2)
+    else $m[0] | "== \(.label) (\(.sid[0:8])) ==\n\(.bufferTail)" end'
