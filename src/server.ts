@@ -395,7 +395,7 @@ async function registerStep(target: { sid?: string; to?: string }, text: string)
   else {
     if (plan.nodes.length >= 40) return `plan ${planId} is full (40 steps)`;
     const prev = plan.nodes.filter((n: any) => n.sid === owner && typeof n.step === 'number' && n.step < step.n).sort((x: any, y: any) => y.step - x.step)[0];
-    plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, step: step.n, statusAt: nowS, startedAt: nowS });
+    plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, step: step.n, statusAt: nowS, startedAt: nowS, createdAt: nowS });
   }
   plan.updatedAt = nowS; writePlan(plan);
   return `${existing ? 'updated' : 'added'} step ${id} in plan ${planId}: ${step.title}`;
@@ -450,7 +450,7 @@ app.post('/plan', (req, res) => {
   }
   // Keep each step's timeline: when its status last changed, carried over if the step and status are unchanged.
   const nowS = Date.now() / 1000;
-  for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
+  for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); n.createdAt = o?.createdAt ?? (o ? undefined : nowS); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
   writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, nodes: clean, updatedAt: nowS });
   res.json({ ok: true, plan: planId, nodes: clean.length });
 });
@@ -462,7 +462,7 @@ app.post('/plan/node', (req, res) => {
     const open = p.nodes.filter((k: any) => k.parent === n.id && !['done'].includes(k.status));
     if (open.length) return res.status(409).json({ error: `step ${n.id} still has unfinished sub-steps (${open.map((k: any) => k.id).join(', ')}). Finish or cancel them first, or pass force:true.` });
   }
-  if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; } }
+  if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; else delete n.doneAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
   if (sid !== undefined) n.sid = sid ? String(sid).slice(0, 40) : undefined;   // owner agent: session id prefix, empty clears
   p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true, plan: p.id });
@@ -562,11 +562,11 @@ app.post('/workers', (req, res) => {
     if (!plan) return res.status(400).json({ error: `stepTitle needs plan: which plan does this worker belong to? (plans: ${planIdsHint()})` });
     if (b.parent && !plan.nodes.some((n: any) => n.id === b.parent)) return res.status(400).json({ error: `parent step "${b.parent}" is not in plan ${plan.id}` });
     if (plan.nodes.length >= 40) return res.status(400).json({ error: `plan ${plan.id} is full (40 steps)` });
-    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, parent: b.parent ? String(b.parent).slice(0, 40) : undefined, statusAt: nowS, startedAt: nowS };
+    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, createdAt: nowS, parent: b.parent ? String(b.parent).slice(0, 40) : undefined, statusAt: nowS, startedAt: nowS };
     plan.nodes.push(node);
   }
   if (node && b.status !== undefined && node.status !== STEP_OF[w.status]) {
-    node.status = STEP_OF[w.status]; node.statusAt = nowS; if (node.status === 'done') node.doneAt = nowS;
+    node.status = STEP_OF[w.status]; node.statusAt = nowS; if (node.status === 'done') node.doneAt = nowS; else delete node.doneAt;
   }
   if (node) { node.note = w.status === 'review' ? 'awaiting lead review' : w.status === 'failed' ? (w.note || 'worker failed') : node.note; plan.updatedAt = nowS; writePlan(plan); }
   if (b.status !== undefined && b.status !== prevStatus && ['review', 'done', 'failed'].includes(b.status)) host.notify({ level: b.status === 'failed' ? 'warn' : 'info', title: `${w.label || id}: ${b.status}`, text: w.note || '' });

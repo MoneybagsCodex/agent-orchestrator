@@ -128,3 +128,12 @@ Health fields (`stalled`, `quietMinutes`, `worktreeLeft`) are computed on read a
 ## 6. Tool-error reporting
 
 A shell call that exits 1 after printing real output (a chained `grep`/`ls`/`diff` finding nothing in one step) is usually not a failure. Error lines now name the command and mark such cases as "likely a no-match ... not a real failure", and the summarizer is told not to list them as issues. This came from a real false report: a harmless exit 1 on a grep chain was summarized as a "notify function conflict" bug at `src/host.ts:166`; `notify()` itself was correct.
+
+## 7. Burndown and swimlanes (dashboard)
+
+The "Velocity & workload" panel under the plan graphs is computed in the browser from the steps' own timestamps; there is no extra endpoint.
+
+- **Step timestamps:** `createdAt` (set when a step joins a plan; older steps fall back to `startedAt`), `startedAt`, `doneAt`. `doneAt` is now cleared when a step leaves `done`, so a reopened step stops counting as finished.
+- **Burndown:** two step lines over time, cumulative done (solid) and total scope (dashed); the shaded gap is what remains. Velocity is steps finished in the last hour; the finish estimate is shown only when there is a pace to project from. Steps that predate `createdAt` appear at their first known time, so early scope is approximate.
+- **Swimlanes:** one lane per agent (a subagent gets its own lane, unrouted work goes to "Unassigned"). Bars run from start to finish, or to now while active; overlapping steps stack on sub-rows. Colours follow step status, and an agent's live state overrides a stale "active" the same way the plan graph does.
+
