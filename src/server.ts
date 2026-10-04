@@ -107,7 +107,7 @@ app.post('/chat', (req, res) => {
     return res.status(400).json({ error: 'message is required' });
   }
 
-  const selectedModel = model ?? 'claude-opus-5-5';
+  const selectedModel = model ?? 'claude-haiku-4-5-20251001';
 
   // Set up SSE response
   res.setHeader('Content-Type', 'text/event-stream');
