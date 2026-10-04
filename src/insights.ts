@@ -199,13 +199,39 @@ function runHeadlines() {
   }
 }
 
+// ---------------------------------------------------------------- cost tracking
+const USAGE_LOG = path.join(ORCH_DIR, 'usage-log.jsonl');
+const featureOf = (key: string) => key.includes('|ledger2|') ? 'done-ledger' : key.includes('|done|') ? 'finished-outcome' : key.includes('|stand|') ? 'decide-issues' : key.includes('|goal|') ? 'working-on' : 'other';
+export function logUsage(feature: string, j: any) {
+  const u = j?.usage ?? {};
+  const row = { at: Math.floor(Date.now() / 1000), feature, input: u.input_tokens ?? 0, output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0, usd: j?.total_cost_usd ?? 0, ms: j?.duration_ms ?? 0 };
+  try { fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.appendFileSync(USAGE_LOG, JSON.stringify(row) + '\n'); } catch { /* best effort */ }
+}
+export function costsSummary() {
+  let rows: any[] = [];
+  try { rows = fs.readFileSync(USAGE_LOG, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }
+  const now = Date.now() / 1000;
+  const by: Record<string, any> = {};
+  for (const r of rows) {
+    const b = (by[r.feature] ??= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, lastHour: 0 });
+    b.calls++; b.input += r.input; b.output += r.output; b.cacheRead += r.cacheRead; b.cacheWrite += r.cacheWrite; b.usd += r.usd;
+    if (now - r.at < 3600) b.lastHour += r.input + r.output + r.cacheRead + r.cacheWrite;
+  }
+  for (const b of Object.values(by) as any[]) { b.tokensPerCall = b.calls ? Math.round((b.input + b.output + b.cacheRead + b.cacheWrite) / b.calls) : 0; b.usd = +b.usd.toFixed(4); }
+  return { since: rows[0]?.at ?? null, calls: rows.length, byFeature: by };
+}
+
 async function runJob(job: { key: string; prompt: string; apply?: (out: string) => void }) {
   try {
     const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(cleanEnv)) if (k.startsWith('CLAUDE_CODE_')) delete cleanEnv[k];
     const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
-      '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', job.prompt],
-      { ...cleanEnv, PWD: '/tmp' }, 90000, '/tmp');
+      '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json', job.prompt],
+      { ...cleanEnv, PWD: '/tmp' }, 90000, '/tmp').then((raw) => {
+        // The JSON envelope carries the real token usage; log it per feature, then hand back just the text.
+        try { const j = JSON.parse(raw); logUsage(featureOf(job.key), j); return String(j.result ?? ''); } catch { return raw; }
+      });
     if (job.apply) { job.apply(out); return; }
     let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
     if (job.key.includes('|stand|')) {
@@ -590,5 +616,6 @@ async function watch() {
 
 export function startInsights(d: Deps) {
   deps = d;
+  d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e));
   setInterval(watch, 5000);
 }

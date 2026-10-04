@@ -206,6 +206,7 @@ export class OrchestratorHost extends EventEmitter {
       }
     } else if (e.type === 'result') {
       if (e.subtype === 'success') { try { fs.writeFileSync(this.opts.startedFile, '1'); } catch { /* ignore */ } }
+      this.emit('result-usage', e);
       // Every turn, whoever started it, ends with a result event.
       if (this.active > 0 && --this.active === 0) this.push({ kind: 'turn', state: 'end' });
     } else if (e.type === 'rate_limit_event') {

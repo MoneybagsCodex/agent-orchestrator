@@ -18,7 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { costsSummary, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -383,6 +383,7 @@ app.post('/plan/node', (req, res) => {
 });
 app.delete('/plan', (_req, res) => { try { fs.unlinkSync(PLAN_FILE); } catch { /* none */ } res.json({ ok: true }); });
 
+app.get('/costs', (_req, res) => res.json(costsSummary()));
 app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));
 
 /** POST /stop — interrupt whatever the orchestrator is doing right now (it stays alive and usable). */
