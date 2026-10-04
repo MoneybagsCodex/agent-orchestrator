@@ -531,6 +531,13 @@ function parseConversation(file: string): ConvItem[] {
   return items;
 }
 
+/** An agent's own prose messages (not tool output), in order, with a stable index; used by auto-planning to see only what is new. */
+export async function assistantMessagesFor(a: { pid: number; sid: string }): Promise<{ i: number; text: string; at: number }[]> {
+  const tr = transcriptFor(a.pid, a.sid);
+  if (!tr) return [];
+  return parseConversation(tr).filter((x) => x.role === 'assistant').map((x) => ({ i: x.i, text: x.text, at: x.at }));
+}
+
 /** A page of an agent's full conversation, newest last. `before` is an item index: pass the first index you have to load earlier ones. */
 export async function conversationFor(sid: string, before?: number, limit = 150) {
   const a = (await getAgents()).find((x: any) => x.sid === sid || (sid.length >= 6 && x.sid.startsWith(sid)));

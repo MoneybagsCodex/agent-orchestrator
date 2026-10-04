@@ -18,7 +18,8 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { getAgents, costsSummary, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { detectWork, sameWork, type Detected } from './autoplan';
+import { getAgents, costsSummary, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -405,6 +406,76 @@ app.post('/plan/auto', async (req, res) => {
   catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 host.on('sent-message', (m: { to: string; text: string }) => { registerStep({ to: m.to }, m.text).then((r) => { if (!r.startsWith('not a step')) console.log('[plan-auto]', r); }).catch(() => { /* best effort */ }); });
+
+// ---- Auto-planning: work an agent SAYS needs doing ("we need X", "next is Y") becomes a todo step in its plan ----
+// Scans routed agents' new prose every 20 s. Steps are owned by the agent, status todo, chained after the agent's latest step, marked auto:true
+// and never touch an existing step. Guards: dedup against every title in the plan, vague/negated/question sentences skipped, caps per message,
+// per agent per hour and per plan. First sight of an agent only records where its transcript ends (no backfill of history).
+const AUTOPLAN_FILE = path.join(SESSIONS_DIR, 'autoplan.json');
+const AUTOPLAN_PER_HOUR = 6, AUTOPLAN_PLAN_LIMIT = 36;
+type AutoState = { cursor: Record<string, number>; recent: Record<string, number[]>; enabled: boolean };
+const readAuto = (): AutoState => { try { const j = JSON.parse(fs.readFileSync(AUTOPLAN_FILE, 'utf-8')); return { cursor: j.cursor ?? {}, recent: j.recent ?? {}, enabled: j.enabled !== false }; } catch { return { cursor: {}, recent: {}, enabled: true }; } };
+const writeAuto = (s: AutoState) => { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(AUTOPLAN_FILE, JSON.stringify(s)); };
+
+/** Add detected work to the owner's plan. Returns what was added and what was skipped (and why), for logs and the dry-run endpoint. */
+function planDetected(owner: string, planId: string, found: Detected[], dry: boolean, state?: AutoState): { added: string[]; skipped: string[] } {
+  const added: string[] = [], skipped: string[] = [];
+  const plan = readPlan(planId); if (!plan) return { added, skipped: ['plan missing'] };
+  const nowS = Date.now() / 1000;
+  const recent = ((state?.recent[owner]) ?? []).filter((t) => nowS - t < 3600);
+  for (const d of found) {
+    const dup = plan.nodes.find((n: any) => sameWork(n.title ?? '', d.title));
+    if (dup) { skipped.push(`already planned as ${dup.id}: ${d.title}`); continue; }
+    if (plan.nodes.length >= AUTOPLAN_PLAN_LIMIT) { skipped.push(`plan ${planId} near its 40-step limit: ${d.title}`); continue; }
+    if (recent.length >= AUTOPLAN_PER_HOUR) { skipped.push(`${owner} hit ${AUTOPLAN_PER_HOUR} auto steps this hour: ${d.title}`); continue; }
+    const prev = plan.nodes.filter((n: any) => n.sid === owner).sort((x: any, y: any) => (x.createdAt ?? x.startedAt ?? 0) - (y.createdAt ?? y.startedAt ?? 0)).pop();
+    let k = plan.nodes.filter((n: any) => n.sid === owner && n.auto).length + 1, id = `${owner}-a${k}`;
+    while (plan.nodes.some((n: any) => n.id === id)) id = `${owner}-a${++k}`;
+    added.push(`${id}: ${d.title}${prev ? ` (after ${prev.id})` : ''}`);
+    plan.nodes.push({ id, title: d.title, deps: prev ? [prev.id] : [], status: 'todo', sid: owner, auto: true, statusAt: nowS, createdAt: nowS });   // in memory even on a dry run, so ids and chaining match what a real run would write
+    recent.push(nowS);
+  }
+  if (!dry && added.length) { plan.updatedAt = nowS; writePlan(plan); if (state) state.recent[owner] = recent; }
+  return { added, skipped };
+}
+
+let autoScanning = false;
+async function autoPlanScan() {
+  if (autoScanning) return; autoScanning = true;
+  try {
+    const state = readAuto(); if (!state.enabled) return;
+    let dirty = false;
+    for (const a of await getAgents()) {
+      const planId = planForAgent(a.sid); if (!planId) continue;
+      const owner = a.sid.slice(0, 8), msgs = await assistantMessagesFor(a);
+      if (state.cursor[owner] === undefined) { state.cursor[owner] = msgs.length ? msgs[msgs.length - 1].i : -1; dirty = true; continue; }
+      const fresh = msgs.filter((m) => m.i > state.cursor[owner]); if (!fresh.length) continue;
+      state.cursor[owner] = fresh[fresh.length - 1].i; dirty = true;
+      for (const m of fresh) {
+        const found = detectWork(m.text); if (!found.length) continue;
+        const r = planDetected(owner, planId, found, false, state);
+        for (const s of r.added) console.log(`[plan-auto] ${owner} said: ${s}`);
+        for (const s of r.skipped) console.log(`[plan-auto] ${owner} skipped: ${s}`);
+      }
+    }
+    if (dirty) writeAuto(state);
+  } catch (e) { console.error('[plan-auto]', (e as Error).message); } finally { autoScanning = false; }
+}
+setInterval(autoPlanScan, 20000);
+/** POST /plan/detect {text, sid?} — dry run: what would auto-planning make of this message? With `apply:true` and a routed sid it adds the steps. */
+app.post('/plan/detect', async (req, res) => {
+  try {
+    const found = detectWork(String(req.body?.text ?? ''));
+    const sid = String(req.body?.sid ?? ''); const planId = sid ? planForAgent(sid) : null;
+    if (!sid || !planId) return res.json({ ok: true, found, note: sid ? `agent ${sid.slice(0, 8)} is not routed to a plan` : 'no sid given: patterns only' });
+    const state = readAuto();
+    const r = planDetected(sid.slice(0, 8), planId, found, req.body?.apply !== true, state);
+    if (req.body?.apply === true) writeAuto(state);
+    res.json({ ok: true, found, ...r, dryRun: req.body?.apply !== true });
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+app.get('/plan/auto-config', (_req, res) => res.json({ enabled: readAuto().enabled }));
+app.post('/plan/auto-config', (req, res) => { const s = readAuto(); s.enabled = req.body?.enabled !== false; writeAuto(s); res.json({ ok: true, enabled: s.enabled }); });
 
 app.get('/plans', (_req, res) => res.json({ plans: listPlans(), routing: readRouting() }));
 app.post('/plans', (req, res) => {

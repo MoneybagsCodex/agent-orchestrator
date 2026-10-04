@@ -137,3 +137,36 @@ The "Velocity & workload" panel under the plan graphs is computed in the browser
 - **Burndown:** two step lines over time, cumulative done (solid) and total scope (dashed); the shaded gap is what remains. Velocity is steps finished in the last hour; the finish estimate is shown only when there is a pace to project from. Steps that predate `createdAt` appear at their first known time, so early scope is approximate.
 - **Swimlanes:** one lane per agent (a subagent gets its own lane, unrouted work goes to "Unassigned"). Bars run from start to finish, or to now while active; overlapping steps stack on sub-rows. Colours follow step status, and an agent's live state overrides a stale "active" the same way the plan graph does.
 
+
+## 8. Auto-planning from agent messages
+
+When a routed agent *says* work still needs doing, the server turns it into a plan step so it is not lost in scrollback. This sits beside, and never replaces, numbered `Step N:` messages (section 2).
+
+**How it runs:** every 20 s the server reads each routed agent's new prose (not tool output, not code blocks). The first time it sees an agent it only records where the transcript ends, so history is never backfilled. Each step is owned by the agent, status `todo`, marked `auto:true`, id `<agent>-a<k>`, and chained after that agent's latest step. It never edits an existing step.
+
+**Patterns detected** (one sentence at a time; the first matching pattern wins):
+
+| Pattern | Example |
+|---|---|
+| we/I need (to) | "We need to add retry logic to the spawn path" |
+| next is / next up / next: | "Next is wiring the legend into the theme tokens" |
+| next we/I ... | "Next, I'll write the docs" |
+| we/I should/must + an action verb, "should add ..." | "We should add a stale-worker kill switch" |
+| TODO / follow-up / remaining: | "TODO: handle expired tokens" |
+| what's left is | "What's left is the migration" |
+
+**Edge cases handled:**
+
+| Case | Behaviour |
+|---|---|
+| Already planned | Skipped if most of the shorter title's words appear in any existing step of the plan (so "Add retry" matches "Add retry logic to the spawn path"). Logged as `skipped: already planned as <id>`. |
+| Vague ("we need it", "do something", "more work") | Skipped: title under 12 characters or 3 words, or fewer than 2 meaningful words. |
+| Negated or hedged ("we don't need", "if we need", "maybe", "might need") | Skipped. |
+| Questions | Skipped (sentence ends with `?`). |
+| Code blocks, quotes | Ignored. Inline code keeps its text. |
+| Floods | At most 3 per message, 6 per agent per hour, and nothing once the plan holds 36 of its 40 steps. |
+| Agent not routed | Nothing is added (same rule as section 2). |
+
+**Controls:** `POST /plan/detect {"text":"...","sid":"<agent>"}` is a dry run showing what would be added or skipped; add `"apply":true` to write. `POST /plan/auto-config {"enabled":false}` turns the scanner off. State is in `orchestrator-sessions/autoplan.json` (cursors, hourly counts, switch). Patterns live in `src/autoplan.ts`.
+
+**Known limits:** it is regex, not understanding; a phrasing outside the table is missed and a rare hedge can slip through, so auto steps are `todo` and need a human or lead to promote or delete them. The agent's *own* later reports do not close them: nothing is marked done automatically.
