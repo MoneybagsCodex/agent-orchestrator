@@ -1,0 +1,7 @@
+#!/bin/bash
+# List all live agent terminals from the bridge
+# Output: JSON array of {sid, agent, label, cwd, pid, startedAt}
+
+BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+
+curl -s "$BRIDGE_URL/terminals" | jq '.sessions // []'

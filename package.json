@@ -5,8 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "demo": "tsx src/demo.ts",
-    "server": "tsx src/api-server.ts",
+    "server": "tsx src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },

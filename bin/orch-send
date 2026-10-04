@@ -1,0 +1,44 @@
+#!/bin/bash
+# Send input to a terminal by label or sid
+# Usage: orch-send <label|sid> <text> [submit=true]
+#
+# If the argument looks like a session ID (contains dashes), use it directly.
+# Otherwise, try to find it by label in the session list.
+
+set -e
+
+BRIDGE_URL="${BRIDGE_URL:-http://localhost:3002}"
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: orch-send <label|sid> <text> [submit=true]" >&2
+  exit 1
+fi
+
+TARGET="$1"
+TEXT="$2"
+SUBMIT="${3:-true}"
+
+# If target looks like a session ID (has dashes), use it directly
+if [[ "$TARGET" == *-* ]]; then
+  SID="$TARGET"
+else
+  # Try to find by label
+  SID=$(curl -s "$BRIDGE_URL/terminals" | jq -r ".sessions[] | select(.label == \"$TARGET\" or .agent == \"$TARGET\") | .sid" | head -1)
+
+  if [[ -z "$SID" ]]; then
+    echo "❌ Terminal not found: $TARGET" >&2
+    exit 1
+  fi
+fi
+
+# Send input to the terminal
+RESPONSE=$(curl -s -X POST "$BRIDGE_URL/terminal/$SID/input" \
+  -H "Content-Type: application/json" \
+  -d "{\"text\": $(echo "$TEXT" | jq -Rs '.'), \"submit\": $SUBMIT}")
+
+if echo "$RESPONSE" | jq -e '.ok' > /dev/null 2>&1; then
+  echo "✓ Sent to $TARGET"
+else
+  echo "❌ Failed to send: $(echo "$RESPONSE" | jq -r '.error // "unknown error"')" >&2
+  exit 1
+fi
