@@ -199,6 +199,40 @@ function runHeadlines() {
   }
 }
 
+// ---------------------------------------------------------------- per-agent token counts (from the transcript's own usage fields)
+interface TokRow { at: number; inp: number; out: number; cr: number }   // inp = fresh input + cache writes; cr = cache reads
+const tokCache = new Map<string, { offset: number; rows: Map<string, TokRow> }>();
+export interface TokenStats { input: number; output: number; cacheRead: number; total: number; perHour: number; turnTotal: number; messages: number }
+export function tokensFor(file: string, turnStart: number): TokenStats {
+  const st = fs.statSync(file);
+  let c = tokCache.get(file);
+  if (!c || c.offset > st.size) { c = { offset: 0, rows: new Map() }; tokCache.set(file, c); }
+  if (st.size > c.offset) {
+    const fd = fs.openSync(file, 'r'); const buf = Buffer.alloc(st.size - c.offset);
+    fs.readSync(fd, buf, 0, buf.length, c.offset); fs.closeSync(fd);
+    const text = buf.toString('utf-8'); const end = text.lastIndexOf('\n');   // only whole lines; a half-written last line is read next time
+    if (end >= 0) {
+      c.offset += Buffer.byteLength(text.slice(0, end + 1));
+      for (const line of text.slice(0, end).split('\n')) {
+        if (!line.includes('"usage"')) continue;
+        let e: any; try { e = JSON.parse(line); } catch { continue; }
+        const u = e.message?.usage; if (e.type !== 'assistant' || !u || !e.message?.id || e.isSidechain) continue;
+        // One API message is written once per content block with the same usage; keep one row per message id.
+        c.rows.set(e.message.id, { at: e.timestamp ? Date.parse(e.timestamp) / 1000 : 0, inp: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), out: u.output_tokens ?? 0, cr: u.cache_read_input_tokens ?? 0 });
+      }
+    }
+  }
+  const now = Date.now() / 1000;
+  const t: TokenStats = { input: 0, output: 0, cacheRead: 0, total: 0, perHour: 0, turnTotal: 0, messages: c.rows.size };
+  for (const r of c.rows.values()) {
+    const all = r.inp + r.out + r.cr;
+    t.input += r.inp; t.output += r.out; t.cacheRead += r.cr; t.total += all;
+    if (now - r.at < 3600) t.perHour += all;
+    if (turnStart && r.at >= turnStart) t.turnTotal += all;
+  }
+  return t;
+}
+
 // ---------------------------------------------------------------- cost tracking
 const USAGE_LOG = path.join(ORCH_DIR, 'usage-log.jsonl');
 const featureOf = (key: string) => key.includes('|ledger2|') ? 'done-ledger' : key.includes('|done|') ? 'finished-outcome' : key.includes('|stand|') ? 'decide-issues' : key.includes('|goal|') ? 'working-on' : 'other';
@@ -287,6 +321,8 @@ export async function buildStatus() {
     let turns: TurnSummary[] = [], doing = '', activity: Activity | null = null;
     const tr = transcriptFor(a.pid, a.sid);
     if (tr) { try { ({ turns, doing, activity } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
+    let tokens: TokenStats | null = null;
+    if (tr) { try { tokens = tokensFor(tr, activity?.turnStart ?? 0); } catch { /* unreadable */ } }
     let doneLog = { items: [] as DoneItem[], total: 0, read: 0, of: 0 };
     if (tr) {
       try { ensureDone(a.sid, tr, a.state === 'WORKING'); } catch { /* unreadable */ }
@@ -298,7 +334,7 @@ export async function buildStatus() {
     const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
     const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, activity, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
+      ...a, turns, doing, activity, tokens, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt, reply: t.reply ?? '' })),
     };
