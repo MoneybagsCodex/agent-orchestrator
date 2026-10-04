@@ -7,6 +7,7 @@
  *  - standing instructions the orchestrator keeps applying
  */
 import { execFile } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -116,9 +117,47 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
   return res;
 }
 
+
+// ---------------------------------------------------------------- "Working on" headlines (model-written, cached)
+const HEADLINES_FILE = path.join(ORCH_DIR, 'headlines.json');
+const headlines: Record<string, string> = readJson<Record<string, string>>(HEADLINES_FILE, {});
+const headlineQueue: Array<{ key: string; asked: string[]; said: string }> = [];
+const headlineQueued = new Set<string>();
+let headlineBusy = false;
+
+/** What the user is asking this agent to accomplish, in one short line. Cached; computed in the background. */
+function headlineFor(sid: string, asked: string[], said: string): string | null {
+  if (!asked.length) return null;
+  const key = `${sid}|${createHash('sha1').update(asked.join('\n')).digest('hex').slice(0, 12)}`;
+  if (headlines[key]) return headlines[key];
+  if (!headlineQueued.has(key)) { headlineQueued.add(key); headlineQueue.push({ key, asked, said }); void runHeadlines(); }
+  return null;
+}
+
+async function runHeadlines() {
+  if (headlineBusy) return;
+  headlineBusy = true;
+  while (headlineQueue.length) {
+    const job = headlineQueue.shift()!;
+    const prompt = `Below are the most recent requests a person made to a coding agent, oldest first. In ONE short line (at most 14 words) say what the agent is working toward right now, as a goal that starts with a verb like "Adding", "Fixing", "Designing", "Deciding". Weight the most recent request most, and use earlier ones only to understand what it refers to. Do not quote them. Output only that line, nothing else.\n\n${job.asked.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n')}`;
+    try {
+      const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+      for (const k of Object.keys(cleanEnv)) if (k.startsWith('CLAUDE_CODE_')) delete cleanEnv[k];
+      const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
+        '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', prompt],
+        { ...cleanEnv, PWD: '/tmp' }, 60000, '/tmp');
+      const line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
+      const clean = line.replace(/^["'`\-\*\s]+|["'`\s]+$/g, '').slice(0, 140);
+      if (clean) { headlines[job.key] = clean; fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(HEADLINES_FILE, JSON.stringify(headlines, null, 2)); }
+    } catch (e) { console.error('[headline]', (e as Error).message.slice(0, 160)); }
+    headlineQueued.delete(job.key);
+  }
+  headlineBusy = false;
+}
+
 // ---------------------------------------------------------------- digest + status
-function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeout = 15000): Promise<string> {
-  return new Promise((resolve, reject) => execFile(cmd, args, { env, timeout }, (err, out, errOut) => (err ? reject(new Error(errOut || err.message)) : resolve(out))));
+function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeout = 15000, cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => execFile(cmd, args, { env, timeout, cwd }, (err, out, errOut) => (err ? reject(new Error(errOut || err.message)) : resolve(out))));
 }
 
 export interface Deps { host: OrchestratorHost; binDir: string; bridgeUrl: string }
@@ -156,8 +195,10 @@ export async function buildStatus() {
     let turns: TurnSummary[] = [], doing = '';
     const tr = transcriptFor(a.pid, a.sid);
     if (tr) { try { ({ turns, doing } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
+    const recentAsks = turns.filter((t) => !t.loop && t.asked).slice(-3).map((t) => t.asked);
+    const headline = headlineFor(a.sid, recentAsks, turns.at(-1)?.said ?? '');
     return {
-      ...a, turns, doing,
+      ...a, turns, doing, headline,
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt })),
     };
@@ -264,6 +305,8 @@ interface Seen { state: string; since: number; loop: boolean; notifiedBlocked: b
 const seen = new Map<string, Seen>();
 const notifiedHeld = new Set<string>();
 const notifiedStalled = new Set<string>();
+const notifiedUnanswered = new Set<string>();
+const reportedLedger = new Set<string>();
 let notifiedUsage = '';
 
 function notify(level: 'info' | 'warn', title: string, text: string, sid?: string, forModel = true) {
@@ -295,6 +338,24 @@ async function watch() {
     }
     for (const t of readJson<any[]>(path.join(ORCH_DIR, 'tasks.json'), [])) {
       if (t.status === 'stalled' && !notifiedStalled.has(t.id)) { notifiedStalled.add(t.id); notify('warn', `${t.title || 'An agent'} has not replied`, `No answer to: "${String(t.text).slice(0, 100)}"`, t.sid); }
+    }
+    // An agent that finished the turn handling our message but never messaged back (a person-driven session, or an agent
+    // that forgot): report what it said ourselves, so the user is never left waiting in silence.
+    for (const m of deps.host.readMessages()) {
+      if ((m.state !== 'sent' && m.state !== 'released') || now - m.sentAt < 20) continue;
+      const a: any = status.agents.find((x: any) => x.peer === m.to || (x.name && x.name === m.to));
+      if (!a) continue;
+      if (now - m.sentAt > 600 && !notifiedUnanswered.has(m.msgId)) {
+        notifiedUnanswered.add(m.msgId);
+        notify('warn', `${a.topic || a.label} has not replied`, `No answer in 10 minutes to: "${m.text.slice(0, 100)}"`, a.sid, false);
+      }
+      if (a.state !== 'IDLE' || reportedLedger.has(m.msgId)) continue;
+      const needle = m.text.slice(0, 30);
+      const t = [...(a.turns || [])].reverse().find((x: any) => !x.inProgress && x.endedAt >= m.sentAt && x.said && x.asked.includes(needle));
+      if (!t) continue;
+      reportedLedger.add(m.msgId);
+      deps.host.markDone(m.msgId);
+      deps.host.sendSystem(`[agent-reply] "${a.topic || a.label}" [${a.sid.slice(0, 8)}] finished the turn handling your message ("${m.text.slice(0, 120)}") but did not message you back. Its last message was: "${t.said}". Tell the user what it said, in plain words, naming the agent. Do not message any agent now.`);
     }
     const u = status.usage;
     if (u && u.status && u.status !== 'allowed' && notifiedUsage !== u.status) { notifiedUsage = u.status; notify('warn', 'Usage limit', `Status: ${u.status}`, undefined, false); }

@@ -94,6 +94,8 @@ export class OrchestratorHost extends EventEmitter {
     const args = [
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--model', this.opts.model,
+      // A stable name: agents reply to a NAME, and the auto-generated one changes every restart, which sends their replies nowhere.
+      '--name', 'master-orchestrator',
       ...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
       // Locked down: only these tools, anything else is denied outright; user-level settings (with their
       // broad allow rules) are ignored; no MCP servers, no skills.
@@ -192,7 +194,10 @@ export class OrchestratorHost extends EventEmitter {
         const m = raw.match(/"msg_id"\s*:\s*"([0-9a-f-]+)"/);
         const info = this.pendingSends.get(b.tool_use_id)!;
         this.pendingSends.delete(b.tool_use_id);
-        if (m) this.upsertMessage({ msgId: m[1], to: info.to, text: info.text.slice(0, 300), sentAt: Math.floor(Date.now() / 1000), state: 'sent' });
+        if (m) {
+          this.upsertMessage({ msgId: m[1], to: info.to, text: info.text.slice(0, 300), sentAt: Math.floor(Date.now() / 1000), state: 'sent' });
+          this.push({ kind: 'notice', state: 'sent', msgId: m[1], text: info.to });
+        }
       }
     } else if (e.type === 'result') {
       if (e.subtype === 'success') { try { fs.writeFileSync(this.opts.startedFile, '1'); } catch { /* ignore */ } }
@@ -218,6 +223,8 @@ export class OrchestratorHost extends EventEmitter {
     if (i >= 0) list[i] = { ...list[i], ...full, text: list[i].text, to: list[i].to, sentAt: list[i].sentAt }; else list.push(full);
     this.writeMessages(list);
   }
+  /** The agent has effectively answered (we saw its finished turn), even if it did not message back. */
+  markDone(msgId: string) { this.setState(msgId, 'answered'); }
   private setState(msgId: string, state: MessageState) {
     const list = this.readMessages();
     const m = list.find((x) => x.msgId === msgId);
