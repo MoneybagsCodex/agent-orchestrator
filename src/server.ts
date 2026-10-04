@@ -150,12 +150,12 @@ app.post('/chat', (req, res) => {
         // stream-json (--verbose) emits whole messages: {type:"assistant", message:{content:[{type:"text"|"tool_use",...}]}}
         if (event.type === 'assistant') {
           for (const block of event.message?.content ?? []) {
-            let text = '';
-            if (block.type === 'text') text = block.text + '\n\n';
-            else if (block.type === 'tool_use') text = `→ ${block.input?.command ?? block.name}\n`;
-            if (!text) continue;
+            let payload: { text?: string; tool?: string } | null = null;
+            if (block.type === 'text') payload = { text: block.text };
+            else if (block.type === 'tool_use') payload = { tool: block.input?.command ?? block.name };
+            if (!payload) continue;
             isFirstChunk = false;
-            res.write(`data: ${JSON.stringify(text)}\n\n`);
+            res.write(`data: ${JSON.stringify(payload)}\n\n`);
           }
         }
       } catch (e) {
@@ -170,7 +170,7 @@ app.post('/chat', (req, res) => {
 
   proc.on('close', (code) => {
     if (code === 0) fs.writeFileSync(STARTED_FILE, '1', 'utf-8');
-    else if (isFirstChunk) res.write(`data: ${JSON.stringify(`❌ claude exited with code ${code}`)}\n\n`);
+    else if (isFirstChunk) res.write(`data: ${JSON.stringify({ text: `❌ claude exited with code ${code}` })}\n\n`);
     if (!isFirstChunk) {
       res.write('event: end\n');
       res.write('data: ""\n\n');
@@ -182,7 +182,7 @@ app.post('/chat', (req, res) => {
   proc.on('error', (err) => {
     console.error(`[Claude spawn error] ${err.message}`);
     if (!isFirstChunk) {
-      res.write(`data: ${JSON.stringify(`\n\n❌ Error: ${err.message}`)}\n\n`);
+      res.write(`data: ${JSON.stringify({ text: `❌ Error: ${err.message}` })}\n\n`);
     }
     res.end();
   });
