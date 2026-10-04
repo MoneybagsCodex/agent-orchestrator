@@ -18,7 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -167,6 +167,13 @@ app.get('/conversation/:sid', async (req, res) => {
   const before = req.query.before !== undefined ? Number(req.query.before) : undefined;
   const limit = Math.min(Number(req.query.limit ?? 150) || 150, 400);
   res.json(await conversationFor(req.params.sid, before, limit).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
+});
+
+/** POST /done/backfill {sid} — load the next older slice of an agent's history into its Done ledger. */
+app.post('/done/backfill', async (req, res) => {
+  const { sid } = req.body as { sid?: string };
+  if (!sid) return res.status(400).json({ ok: false, message: 'sid is required' });
+  res.json(await backfillDone(sid).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
 });
 
 /** POST /decide {id, decision} — Approve/Deny an item from the needs-you list. */

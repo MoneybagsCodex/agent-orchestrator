@@ -131,7 +131,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
 // ---------------------------------------------------------------- "Working on" headlines (model-written, cached)
 const HEADLINES_FILE = path.join(ORCH_DIR, 'headlines.json');
 const headlines: Record<string, string> = readJson<Record<string, string>>(HEADLINES_FILE, {});
-const headlineQueue: Array<{ key: string; prompt: string }> = [];
+const headlineQueue: Array<{ key: string; prompt: string; apply?: (out: string) => void }> = [];
 const headlineQueued = new Set<string>();
 let headlineBusy = false;
 
@@ -173,9 +173,9 @@ ${body}`);
   return null;
 }
 
-function queueSummary(key: string, prompt: string) {
+function queueSummary(key: string, prompt: string, apply?: (out: string) => void) {
   if (headlineQueued.has(key)) return;
-  headlineQueued.add(key); headlineQueue.push({ key, prompt }); void runHeadlines();
+  headlineQueued.add(key); headlineQueue.push({ key, prompt, apply }); void runHeadlines();
 }
 
 async function runHeadlines() {
@@ -190,6 +190,7 @@ async function runHeadlines() {
       const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
         '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', prompt],
         { ...cleanEnv, PWD: '/tmp' }, 60000, '/tmp');
+      if (job.apply) { job.apply(out); headlineQueued.delete(job.key); continue; }
       let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
       if (job.key.includes('|stand|')) {
         const m = out.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
@@ -243,12 +244,18 @@ export async function buildStatus() {
     let turns: TurnSummary[] = [], doing = '';
     const tr = transcriptFor(a.pid, a.sid);
     if (tr) { try { ({ turns, doing } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
+    let doneLog = { items: [] as DoneItem[], total: 0, exhausted: false };
+    if (tr) {
+      try { ensureDone(a.sid, tr, a.state === 'WORKING'); } catch { /* unreadable */ }
+      const l = readLedger(a.sid);
+      doneLog = { items: [...l.items].sort((x, y) => y.at - x.at).slice(0, 150), total: l.items.length, exhausted: l.exhausted };
+    }
     const recentAsks = turns.filter((t) => !t.loop && t.asked).slice(-3).map((t) => t.asked);
     const headline = headlineFor(a.sid, recentAsks, turns.at(-1)?.said ?? '');
     const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
     const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, headline, outcome, stand: standFor(a.sid, turns), lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
+      ...a, turns, doing, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt, reply: t.reply ?? '' })),
     };
@@ -282,6 +289,89 @@ export async function buildStatus() {
   return { agents: enriched, summary, needsYou: needs, usage };
 }
 
+
+
+// ---------------------------------------------------------------- "Done" ledger: progress across the whole session
+// The per-tile Done list used to come from the last six exchanges only. This keeps a running ledger instead: finished exchanges
+// are summarized in small background batches (cached, never redone) and the items accumulate, so the tile can show the whole history.
+const DONE_DIR = path.join(ORCH_DIR, 'done');
+interface DoneItem { text: string; at: number }
+interface DoneLedger { items: DoneItem[]; newestAt: number; oldestAt: number; exhausted: boolean }
+const FIRST_RUN_TURNS = 40;     // how far back the first pass reaches; older work is loaded on request
+const BATCH = 8;                // exchanges summarized per model call
+
+const ledgerFile = (sid: string) => path.join(DONE_DIR, `${sid}.json`);
+const readLedger = (sid: string): DoneLedger => readJson<DoneLedger>(ledgerFile(sid), { items: [], newestAt: 0, oldestAt: 0, exhausted: false });
+function writeLedger(sid: string, l: DoneLedger) { fs.mkdirSync(DONE_DIR, { recursive: true }); fs.writeFileSync(ledgerFile(sid), JSON.stringify(l)); }
+
+interface FlatTurn { at: number; asked: string; said: string }
+
+/** Finished exchanges (a request, then the agent's final message) across the WHOLE transcript, oldest first. */
+function flatTurns(file: string, busy: boolean): FlatTurn[] {
+  const items = parseConversation(file);
+  const turns: Array<FlatTurn & { open?: boolean }> = [];
+  let cur: FlatTurn | null = null;
+  for (const it of items) {
+    if (it.role === 'user' || it.role === 'recv') { cur = { at: it.at, asked: (it.role === 'recv' ? `From ${it.who}: ` : '') + it.text.replace(/\s+/g, ' ').slice(0, 220), said: '' }; turns.push(cur); }
+    else if (it.role === 'assistant' && cur) cur.said = it.text.replace(/\s+/g, ' ').slice(0, 600);
+  }
+  const done = turns.filter((t) => t.said);
+  return done;
+}
+
+const doneInflight = new Set<string>();
+
+function summarizeBatch(sid: string, batch: FlatTurn[], direction: 'new' | 'old') {
+  const key = `${sid}|ledger|${createHash('sha1').update(batch.map((t) => t.at + t.asked).join('|')).digest('hex').slice(0, 12)}`;
+  const body = batch.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked}\n  The agent's final message: ${t.said}`).join('\n\n');
+  queueSummary(key, `Below are exchanges between a person and a coding agent, oldest first. Reply with ONLY a JSON array of strings: the concrete things that were completed in these exchanges, past tense, at most 12 words each. Skip questions, plans, and anything the agent says is still broken, unfinished, or was undone. Use only what the text says; never guess. Return [] if nothing was completed.\n\n${body}`, (out) => {
+    try {
+      const m = out.replace(/```(?:json)?/g, '').match(/\[[\s\S]*\]/);
+      const arr: unknown = m ? JSON.parse(m[0]) : [];
+      const l = readLedger(sid);
+      const at = batch[batch.length - 1].at;
+      const seen = new Set(l.items.map((x) => x.text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
+      for (const t of Array.isArray(arr) ? arr : []) {
+        const text = String(t).trim().slice(0, 140); const norm = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        if (text && !seen.has(norm)) { seen.add(norm); l.items.push({ text, at }); }
+      }
+      if (direction === 'new') l.newestAt = Math.max(l.newestAt, at); else l.oldestAt = Math.min(l.oldestAt || batch[0].at, batch[0].at);
+      if (!l.oldestAt) l.oldestAt = batch[0].at;
+      writeLedger(sid, l);
+    } catch { /* leave it for the next pass */ }
+    doneInflight.delete(key);
+  });
+}
+
+/** Queue background summaries for any finished exchanges not yet in the ledger. */
+function ensureDone(sid: string, file: string, busy: boolean) {
+  if (doneInflight.size > 40) return;
+  const l = readLedger(sid);
+  const turns = flatTurns(file, busy);
+  if (!turns.length) return;
+  let fresh: FlatTurn[];
+  if (l.newestAt === 0) fresh = turns.slice(-FIRST_RUN_TURNS); else fresh = turns.filter((t) => t.at > l.newestAt);
+  for (let i = 0; i < fresh.length; i += BATCH) {
+    const batch = fresh.slice(i, i + BATCH);
+    // A single trailing exchange is usually still in progress: wait until a second one exists or the agent is idle.
+    if (batch.length < 2 && busy) continue;
+    summarizeBatch(sid, batch, 'new');
+  }
+}
+
+/** Load the next older slice of an agent's history into its ledger. */
+export async function backfillDone(sid: string): Promise<{ ok: boolean; message: string }> {
+  const a = (await getAgents()).find((x: any) => x.sid === sid || (sid.length >= 6 && x.sid.startsWith(sid)));
+  if (!a) return { ok: false, message: 'That agent is no longer running.' };
+  const tr = transcriptFor(a.pid, a.sid);
+  if (!tr) return { ok: false, message: 'This agent has no transcript yet.' };
+  const l = readLedger(a.sid);
+  const older = flatTurns(tr, false).filter((t) => !l.oldestAt || t.at < l.oldestAt);
+  if (!older.length) { l.exhausted = true; writeLedger(a.sid, l); return { ok: true, message: 'That is the beginning: nothing earlier to load.' }; }
+  const slice = older.slice(-FIRST_RUN_TURNS);
+  for (let i = 0; i < slice.length; i += BATCH) summarizeBatch(a.sid, slice.slice(i, i + BATCH), 'old');
+  return { ok: true, message: `Reading ${slice.length} earlier exchanges: new items will appear in a minute.` };
+}
 
 // ---------------------------------------------------------------- full conversation view
 export interface ConvItem { i: number; role: 'user' | 'assistant' | 'tool' | 'error' | 'system' | 'recv' | 'sent'; text: string; at: number; who?: string }
