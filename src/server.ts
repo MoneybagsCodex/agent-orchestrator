@@ -76,6 +76,7 @@ You are the user's master orchestrator. The user talks to you in plain language 
 You can ONLY act through these commands (run them with Bash, exactly as written):
 - orch-status                        START HERE for "what's going on / what is X doing". One digest per agent: state (WORKING / IDLE / BLOCKED on a decision), what it last said, what it was last asked, and notes (e.g. a /goal loop makes idle/busy flicker; that is normal for that agent, not a fault). Report these in plain words; never dump raw output at the user.
 - orch-usage                         the user's real usage-limit status and reset time. For ANY question about usage, limits or what is left, use only this.
+- orch-plan show | set '<json>' | node <id> <todo|active|done|blocked|decide> [note] | clear   the dependency graph the user sees on their dashboard. For multi-step work, set a plan ({"title":...,"nodes":[{"id":"a","title":"...","deps":[],"status":"todo","sid":"<agent id, optional>"}]}); mark a node decide when it needs the user's choice, and update node statuses as agents report. Never mark a node done unless an agent reported it.
 - orch-list                          quick list of live terminals: label, short id, uptime
 - orch-read <id|title> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
 - orch-send <id|title> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction). Slash commands (/compact, /clear, /goal ...) are refused unless you add --confirmed: orch-send <id|title> --confirmed "/compact"
@@ -346,6 +347,42 @@ async function checkTasks() {
 setInterval(checkTasks, 4000);
 
 /** GET /tasks — delegations the orchestrator is tracking (for the UI). */
+
+// ---- Plan: a small dependency graph the orchestrator maintains and the dashboard draws ----
+const PLAN_FILE = path.join(SESSIONS_DIR, 'plan.json');
+const PLAN_STATUS = ['todo', 'active', 'done', 'blocked', 'decide'];
+const readPlan = () => { try { return JSON.parse(fs.readFileSync(PLAN_FILE, 'utf-8')); } catch { return null; } };
+const writePlan = (p: any) => { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(PLAN_FILE, JSON.stringify(p, null, 2)); };
+app.get('/plan', (_req, res) => res.json({ plan: readPlan() }));
+app.post('/plan', (req, res) => {
+  const { title, nodes } = req.body ?? {};
+  if (!Array.isArray(nodes) || !nodes.length || nodes.length > 40) return res.status(400).json({ error: 'nodes must be a list of 1-40 items' });
+  const ids = new Set<string>();
+  const clean: any[] = [];
+  for (const n of nodes) {
+    const id = String(n?.id ?? '').slice(0, 40);
+    if (!id || ids.has(id)) return res.status(400).json({ error: `missing or duplicate node id: ${id || '(empty)'}` });
+    ids.add(id);
+    clean.push({ id, title: String(n.title ?? id).slice(0, 120), deps: Array.isArray(n.deps) ? n.deps.map(String) : [],
+      status: PLAN_STATUS.includes(n.status) ? n.status : 'todo', sid: n.sid ? String(n.sid) : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
+  }
+  for (const n of clean) {
+    const bad = n.deps.find((d: string) => !ids.has(d) || d === n.id);
+    if (bad) return res.status(400).json({ error: `node ${n.id} depends on unknown or itself: ${bad}` });
+  }
+  writePlan({ title: String(title ?? 'Plan').slice(0, 120), nodes: clean, updatedAt: Date.now() / 1000 });
+  res.json({ ok: true, nodes: clean.length });
+});
+app.post('/plan/node', (req, res) => {
+  const p = readPlan(); const { id, status, note } = req.body ?? {};
+  const n = p?.nodes.find((x: any) => x.id === id);
+  if (!n) return res.status(404).json({ error: `no plan node ${id}` });
+  if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); n.status = status; }
+  if (note !== undefined) n.note = String(note).slice(0, 300);
+  p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true });
+});
+app.delete('/plan', (_req, res) => { try { fs.unlinkSync(PLAN_FILE); } catch { /* none */ } res.json({ ok: true }); });
+
 app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));
 
 /** POST /stop — interrupt whatever the orchestrator is doing right now (it stays alive and usable). */

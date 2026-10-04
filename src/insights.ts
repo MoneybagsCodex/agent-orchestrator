@@ -42,7 +42,8 @@ export function transcriptFor(pid: number, sid: string): string | null {
   return null;
 }
 
-const turnCache = new Map<string, { key: string; turns: TurnSummary[]; doing: string }>();
+export interface Activity { phase: 'thinking' | 'tool' | 'writing'; tool: string; since: number; turnStart: number; steps: number }
+const turnCache = new Map<string, { key: string; turns: TurnSummary[]; doing: string; activity: Activity | null }>();
 
 function textOf(content: any): string {
   if (typeof content === 'string') return content;
@@ -50,7 +51,7 @@ function textOf(content: any): string {
   return '';
 }
 
-export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; doing: string } {
+export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; doing: string; activity: Activity | null } {
   const st = fs.statSync(file);
   const key = `${st.mtimeMs}-${st.size}-${busy}`;
   const hit = turnCache.get(file);
@@ -67,13 +68,21 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
 
   const turns: TurnSummary[] = [];
   let cur: (TurnSummary & { hook?: boolean }) | null = null;
-  let lastTool = '';
+  let lastTool = '', lastKind: Activity['phase'] = 'thinking', lastToolName = '', lastTs = 0;
   for (const line of lines) {
     if (!line.trim()) continue;
     let e: any; try { e = JSON.parse(line); } catch { continue; }
     if (e.isSidechain || (e.type !== 'user' && e.type !== 'assistant')) continue;
     const ts = e.timestamp ? Math.floor(Date.parse(e.timestamp) / 1000) : 0;
     const c = e.message?.content;
+    if (ts) lastTs = ts;
+    if (e.type === 'user') lastKind = 'thinking';   // a prompt or tool result just arrived: the model is working on it
+    if (e.type === 'assistant' && Array.isArray(c) && c.length) {
+      const lb = c[c.length - 1];
+      if (lb.type === 'tool_use') { lastKind = 'tool'; lastToolName = lb.name; }
+      else if (lb.type === 'text') lastKind = 'writing';
+      else lastKind = 'thinking';
+    }
     if (e.type === 'user') {
       if (Array.isArray(c) && c.some((b: any) => b.type === 'tool_result')) {
         for (const b of c) if (b.type === 'tool_result' && b.is_error && cur) cur.errors++;
@@ -122,7 +131,9 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
   }
   const last = out[out.length - 1];
   if (last && busy) last.inProgress = true;
-  const res = { key, turns: out.slice(-6), doing: busy ? lastTool : '' };
+  const steps = last ? Object.values(last.tools).reduce((x, y) => x + y, 0) : 0;
+  const activity: Activity | null = busy && last ? { phase: lastKind, tool: lastKind === 'tool' ? lastToolName : '', since: lastTs, turnStart: last.startedAt, steps } : null;
+  const res = { key, turns: out.slice(-6), doing: busy ? lastTool : '', activity };
   turnCache.set(file, res);
   return res;
 }
@@ -247,9 +258,9 @@ export async function buildStatus() {
   const now = Date.now() / 1000;
 
   const enriched = agents.map((a: any) => {
-    let turns: TurnSummary[] = [], doing = '';
+    let turns: TurnSummary[] = [], doing = '', activity: Activity | null = null;
     const tr = transcriptFor(a.pid, a.sid);
-    if (tr) { try { ({ turns, doing } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
+    if (tr) { try { ({ turns, doing, activity } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
     let doneLog = { items: [] as DoneItem[], total: 0, read: 0, of: 0 };
     if (tr) {
       try { ensureDone(a.sid, tr, a.state === 'WORKING'); } catch { /* unreadable */ }
@@ -261,7 +272,7 @@ export async function buildStatus() {
     const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
     const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
+      ...a, turns, doing, activity, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt, reply: t.reply ?? '' })),
     };
