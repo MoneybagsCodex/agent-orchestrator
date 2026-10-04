@@ -12,6 +12,6 @@ orch_sessions 400 | jq -c '.[]' | while read -r s; do
     else state="no-transcript"; fi
   fi
   last=$(jq -r '.bufferTail' <<<"$s" | orch_strip_ansi | grep -E '[A-Za-z]' | tail -1 | cut -c1-80)
-  printf '%s\t%s\tup %sm\t%s\t%s\n' "$(jq -r .label <<<"$s")" "${sid:0:8}" \
+  printf '%s\t%s\tpanel:%s\tup %sm\t%s\t%s\n' "$(jq -r '.topic | if . == "" then "untitled" else . end' <<<"$s")" "${sid:0:8}" "$(jq -r .label <<<"$s")" \
     "$(jq -r '((now - .startedAt/1000)/60 | floor)' <<<"$s")" "$state" "$last"
 done | column -t -s $'\t'

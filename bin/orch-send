@@ -1,11 +1,12 @@
 #!/bin/bash
 # Send input to a live terminal.
-# Usage: orch-send <label|sid-prefix> <text>          type text and press Enter
+# Usage: orch-send <session-id|conversation title> <text>          type text and press Enter
 #        orch-send <label|sid-prefix> --key <name>    press a key: enter esc up down left right tab y n ctrl-c
 
 source "$(dirname "$0")/_lib.sh"
-TARGET="${1:?Usage: orch-send <label|sid-prefix> <text> | --key <name>}"
+TARGET="${1:?Usage: orch-send <session-id|conversation title> [--confirmed] <text> | --key <name>}"
 shift
+CONFIRMED=false; [[ "$1" == "--confirmed" ]] && { CONFIRMED=true; shift; }
 
 if [[ "$1" == "--key" ]]; then
   case "$2" in
@@ -23,7 +24,17 @@ else
 fi
 
 s=$(orch_resolve "$TARGET") || exit 1
-sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s")
+sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s"); topic=$(jq -r .topic <<<"$s")
+who=$(orch_who "$s")
+
+# Slash commands change an agent's state (/compact, /clear, /goal, /exit ...) and can't be undone, and the
+# panel label can disagree with what the terminal is really running. Refuse unless the user has confirmed
+# the target by BOTH label and conversation title; the orchestrator then passes --confirmed.
+if [[ "$SUBMIT" == "true" && "$TEXT" == /* && "$CONFIRMED" != "true" ]] && ! [[ "$TEXT" =~ ^/(help|status|cost|usage|context)([[:space:]]|$) ]]; then
+  echo "REFUSED: '$TEXT' changes an agent's state and may not be undoable. Target: $who." >&2
+  echo "Tell the user exactly this target (conversation title and id), get an explicit yes, then re-run: orch-send ${sid:0:8} --confirmed '$TEXT'" >&2
+  exit 4
+fi
 
 # Never type a message into a terminal that is waiting on a permission/menu prompt: the text and the
 # Enter would land in the prompt (possibly approving something). Keys (--key) are exempt on purpose.
@@ -48,13 +59,13 @@ if [[ "$SUBMIT" == "true" ]]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       sleep 1
       cmdname=""; [[ "$TEXT" == /* ]] && cmdname="<command-name>${TEXT%% *}</command-name>"
-      if tail -n 60 "$tr" | grep -qF -- "$(jq -n --arg n "$needle" '$n | @json | .[1:-1]')" || { [[ -n "$cmdname" ]] && tail -n 60 "$tr" | grep -qF -- "$cmdname"; }; then echo "delivered to $label: $DESC (it appears in the agent's transcript)"; exit 0; fi
+      if tail -n 60 "$tr" | grep -qF -- "$(jq -n --arg n "$needle" '$n | @json | .[1:-1]')" || { [[ -n "$cmdname" ]] && tail -n 60 "$tr" | grep -qF -- "$cmdname"; }; then echo "delivered to $who: $DESC (it appears in the agent's transcript)"; exit 0; fi
     done
     st=$(orch_status "$pid")
-    echo "sent to $label: $DESC. NOT CONFIRMED in its transcript after 10s (agent reports: ${st:-unknown}). If it is busy the message is probably queued behind its current work; check with orch-read before assuming it arrived."
+    echo "sent to $who: $DESC. NOT CONFIRMED in its transcript after 10s (agent reports: ${st:-unknown}). If it is busy the message is probably queued behind its current work; check with orch-read before assuming it arrived."
   else
-    echo "sent to $label: $DESC. Delivery can't be confirmed (this agent has no transcript to check)."
+    echo "sent to $who: $DESC. Delivery can't be confirmed (this agent has no transcript to check)."
   fi
 else
-  echo "sent to $label: $DESC"
+  echo "sent to $who: $DESC"
 fi

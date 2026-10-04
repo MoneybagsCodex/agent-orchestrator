@@ -23,7 +23,7 @@ fi
 
 if [[ -n "$tr" ]]; then
   age=$(orch_age "$tr")
-  echo "== $label (${sid:0:8}) — agent reports: ${status:-unknown}; last transcript write ${age}s ago =="
+  echo "== $(orch_who "$s") — agent reports: ${status:-unknown}; last transcript write ${age}s ago =="
   jq -r '
     def txt: .message.content | if type == "string" then . else map(
         if .type == "text" then .text
