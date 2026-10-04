@@ -18,7 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { detectWork, sameWork, type Detected } from './autoplan';
+import { detectWork, detectCompletion, sameWork, type Detected, type Completion } from './autoplan';
 import { getAgents, costsSummary, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
@@ -439,6 +439,30 @@ function planDetected(owner: string, planId: string, found: Detected[], dry: boo
   return { added, skipped };
 }
 
+/** Close the agent's own active step because the agent said it finished. Picks the step it named ("step 8 is done"), else its latest active one.
+ *  Never touches todo/blocked/decide steps, other agents' steps, or a parent with open sub-steps. */
+function completeStep(owner: string, planId: string, c: Completion, dry: boolean): { done?: string; skipped?: string } {
+  const plan = readPlan(planId); if (!plan) return { skipped: 'plan missing' };
+  const mine = plan.nodes.filter((n: any) => n.sid === owner && !n.auto);
+  let node: any;
+  if (c.stepN !== undefined) {
+    node = mine.find((n: any) => n.step === c.stepN);
+    if (!node) return { skipped: `said step ${c.stepN} is finished but ${owner} has no step ${c.stepN}` };
+    if (node.status !== 'active') return { skipped: `step ${node.id} is already ${node.status}` };
+  } else {
+    node = mine.filter((n: any) => n.status === 'active').sort((x: any, y: any) => (y.step ?? 0) - (x.step ?? 0) || (y.startedAt ?? 0) - (x.startedAt ?? 0))[0];
+    if (!node) return { skipped: `${owner} has no active step to close` };
+  }
+  const open = plan.nodes.filter((n: any) => n.parent === node.id && n.status !== 'done' && n.status !== 'cancelled');
+  if (open.length) return { skipped: `${node.id} still has ${open.length} unfinished sub-step(s): ${open.map((n: any) => n.id).join(', ')}` };
+  if (!dry) {
+    const nowS = Date.now() / 1000;
+    node.status = 'done'; node.statusAt = nowS; node.doneAt = nowS; node.autoDone = true; node.note = `auto-completed: "${c.sentence.slice(0, 100)}"`;
+    plan.updatedAt = nowS; writePlan(plan);
+  }
+  return { done: `${node.id}: ${node.title}` };
+}
+
 let autoScanning = false;
 async function autoPlanScan() {
   if (autoScanning) return; autoScanning = true;
@@ -452,6 +476,10 @@ async function autoPlanScan() {
       const fresh = msgs.filter((m) => m.i > state.cursor[owner]); if (!fresh.length) continue;
       state.cursor[owner] = fresh[fresh.length - 1].i; dirty = true;
       for (const m of fresh) {
+        const c = detectCompletion(m.text);
+        // A generic "done" while the agent is still mid-turn is probably about a sub-task: hold the cursor and look again when it is idle (give up after 10 min).
+        if (c && c.strength === 'weak' && a.state === 'WORKING' && Date.now() / 1000 - m.at < 600) { state.cursor[owner] = m.i - 1; break; }
+        if (c) { const r = completeStep(owner, planId, c, false); console.log(`[plan-auto] ${owner} ${r.done ? `finished ${r.done}` : `completion ignored: ${r.skipped}`} ("${c.sentence.slice(0, 60)}")`); }
         const found = detectWork(m.text); if (!found.length) continue;
         const r = planDetected(owner, planId, found, false, state);
         for (const s of r.added) console.log(`[plan-auto] ${owner} said: ${s}`);
@@ -465,13 +493,14 @@ setInterval(autoPlanScan, 20000);
 /** POST /plan/detect {text, sid?} — dry run: what would auto-planning make of this message? With `apply:true` and a routed sid it adds the steps. */
 app.post('/plan/detect', async (req, res) => {
   try {
-    const found = detectWork(String(req.body?.text ?? ''));
+    const found = detectWork(String(req.body?.text ?? '')), completion = detectCompletion(String(req.body?.text ?? ''));
     const sid = String(req.body?.sid ?? ''); const planId = sid ? planForAgent(sid) : null;
-    if (!sid || !planId) return res.json({ ok: true, found, note: sid ? `agent ${sid.slice(0, 8)} is not routed to a plan` : 'no sid given: patterns only' });
+    if (!sid || !planId) return res.json({ ok: true, found, completion, note: sid ? `agent ${sid.slice(0, 8)} is not routed to a plan` : 'no sid given: patterns only' });
     const state = readAuto();
     const r = planDetected(sid.slice(0, 8), planId, found, req.body?.apply !== true, state);
+    const closed = completion ? completeStep(sid.slice(0, 8), planId, completion, req.body?.apply !== true) : null;
     if (req.body?.apply === true) writeAuto(state);
-    res.json({ ok: true, found, ...r, dryRun: req.body?.apply !== true });
+    res.json({ ok: true, found, ...r, completion, closed, dryRun: req.body?.apply !== true });
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 app.get('/plan/auto-config', (_req, res) => res.json({ enabled: readAuto().enabled }));

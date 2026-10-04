@@ -80,3 +80,35 @@ export function sameWork(a: string, b: string): boolean {
   let hit = 0; for (const w of x) if (y.has(w)) hit++;
   return hit / Math.min(x.size, y.size) >= 0.7 && hit >= 2;
 }
+
+// ---------------------------------------------------------------- completion detection
+// An agent saying "published v67" / "shipped" / "step 8 is done" closes its own current active step. Strong phrases name a concrete act or a
+// step; weak ones ("done", "complete") are generic and are only trusted when the agent has stopped working (the server checks that).
+export interface Completion { sentence: string; strength: 'strong' | 'weak'; pattern: string; stepN?: number }
+
+const DONE_NEGATION = /\b(?:not|n't|never|almost|nearly|partly|partially|mostly|once|when|until|before|after|will|would|should|could|to be|going to|about to|if|unless|whether|need to be|yet to|not yet|so far|remaining|left to)\b|\bhalf\b/i;
+const COMPLETIONS: { name: string; strength: 'strong' | 'weak'; re: RegExp }[] = [
+  { name: 'step-done', strength: 'strong', re: /\bstep\s+(\d{1,3})\b[^.!?\n]{0,30}?\b(?:is |was |are )?(?:now |fully )?(?:done|complete|completed|finished|shipped|published)\b/i },
+  { name: 'published', strength: 'strong', re: /\b(?:published|released|deployed)\s+(?:it |this |that )?(?:as |to )?(?:v\d+[\w.-]*|version \d+[\w.-]*|\w+)?|\b(?:i|we)(?:'ve| have)? (?:published|released|deployed)\b/i },
+  { name: 'shipped', strength: 'strong', re: /\b(?:shipped|(?:i|we)(?:'ve| have)? shipped|is shipped|was shipped)\b/i },
+  { name: 'all-done', strength: 'strong', re: /\b(?:all|everything|the (?:task|work|step|feature|fix))\s+(?:is |was |has been |are )?(?:now |fully )?(?:done|complete|completed|finished)\b/i },
+  { name: 'i-finished', strength: 'weak', re: /\b(?:i|we)(?:'ve| have)? (?:completed|finished|wrapped up|merged|pushed)\b/i },
+  { name: 'is-done', strength: 'weak', re: /\b(?:is|are|was|were|now|been)\s+(?:now |fully )?(?:complete|completed|done|finished)\b/i },
+  { name: 'bare', strength: 'weak', re: /^\W*(?:done|complete|completed|finished|shipped)\b\W*$/i },
+  { name: 'bare-lead', strength: 'weak', re: /^\W*(?:done|completed?|finished)\s*[.!:\-–—,]/i },
+];
+
+/** The strongest completion claim in one agent message (null if none, or if every candidate is negated, hedged or a question). */
+export function detectCompletion(text: string): Completion | null {
+  let best: Completion | null = null;
+  for (const s of sentences(String(text))) {
+    if (DONE_NEGATION.test(s)) continue;
+    for (const p of COMPLETIONS) {
+      const m = s.match(p.re); if (!m) continue;
+      const c: Completion = { sentence: s.slice(0, 160), strength: p.strength, pattern: p.name, stepN: p.name === 'step-done' ? Number(m[1]) : (s.match(/\bstep\s+(\d{1,3})\b/i) ? Number(s.match(/\bstep\s+(\d{1,3})\b/i)![1]) : undefined) };
+      if (!best || (best.strength === 'weak' && c.strength === 'strong')) best = c;
+      break;
+    }
+  }
+  return best;
+}

@@ -43,8 +43,7 @@ the server looks up the target agent's route and then:
 Rules of thumb: new long-lived agent -> `orch-plan assign` it before sending it numbered steps. A new domain -> `orch-plan new <id> "<title>"`
 first. Never put one domain's work in another domain's plan; move it instead (edit the plan files via `orch-plan set`).
 
-Statuses: `todo`, `active`, `done`, `blocked`, `decide`. Nothing is marked done automatically: sending the next step does not
-complete the previous one, and a step is only `done` when an agent reported it or the lead verified it.
+Statuses: `todo`, `active`, `done`, `blocked`, `decide`. Sending the next step does not complete the previous one. A step becomes `done` when an agent reports finishing it (section 9 detects that automatically) or the lead verifies it.
 
 ## 3. Subagents
 
@@ -169,4 +168,37 @@ When a routed agent *says* work still needs doing, the server turns it into a pl
 
 **Controls:** `POST /plan/detect {"text":"...","sid":"<agent>"}` is a dry run showing what would be added or skipped; add `"apply":true` to write. `POST /plan/auto-config {"enabled":false}` turns the scanner off. State is in `orchestrator-sessions/autoplan.json` (cursors, hourly counts, switch). Patterns live in `src/autoplan.ts`.
 
-**Known limits:** it is regex, not understanding; a phrasing outside the table is missed and a rare hedge can slip through, so auto steps are `todo` and need a human or lead to promote or delete them. The agent's *own* later reports do not close them: nothing is marked done automatically.
+**Known limits:** it is regex, not understanding; a phrasing outside the table is missed and a rare hedge can slip through, so auto steps are `todo` and need a human or lead to promote or delete them. Completion detection (section 9) only closes `active` steps, never these `todo` ones.
+
+## 9. Completion detection (auto-marking steps done)
+
+When a routed agent reports finishing work, the same 20 s scanner (section 8) marks that agent's own active plan step `done`, sets `doneAt`, and records `autoDone:true` plus a note quoting the sentence that triggered it.
+
+**Which step closes:** the step the message names ("step 8 is done"); otherwise the agent's latest `active` numbered step (highest step number). Only the owner's steps are considered; `todo`, `blocked`, `decide` and auto-planned (`-aN`) steps are never closed this way.
+
+**Phrases** (one sentence at a time, after code, quotes and table rows are stripped):
+
+| Strength | Pattern | Examples |
+|---|---|---|
+| strong | published/released/deployed (optionally a version) | "Published v67." |
+| strong | shipped | "Shipped.", "We've shipped it" |
+| strong | step N + done/complete/finished | "Step 8 is done and committed" |
+| strong | all/everything/the task/work/step/feature/fix + is done/complete | "Everything is complete" |
+| weak | I/we completed, finished, wrapped up, merged, pushed | "I finished the audit" |
+| weak | is/was/now/been + done/complete/finished | "The refactor is complete" |
+| weak | a bare "Done." / "Complete." / "Finished." (sentence-initial) | "Done. Tests pass." |
+
+**Guards:**
+
+| Case | Behaviour |
+|---|---|
+| Negated, hedged or future ("not done", "almost done", "once it's done", "will ship", "when complete", "if", "yet to") | Ignored. Questions are ignored. |
+| Weak phrase while the agent is still working | Probably about a sub-task: the scanner holds its place and re-reads when the agent is idle (gives up after 10 minutes). Strong phrases act immediately. |
+| Named step is already done, or the agent has no such step | Ignored; the reason is logged as `completion ignored: ...`. |
+| Step has unfinished sub-steps | Ignored (same rule as `POST /plan/node`), so a parent never closes ahead of its subagents. |
+| No active step | Ignored. |
+| Old messages | Never. Only messages new since the scanner first saw the agent are read. |
+
+`POST /plan/detect` also reports `completion` and what it would close (`closed`); add `"apply":true` to really close it. `POST /plan/auto-config {"enabled":false}` turns off both detectors. Closing is undone like any step change: `orch-plan node <plan>/<id> active`.
+
+**Known limit:** it trusts the agent's wording, the same as numbered steps did before. An agent that says "done" about only part of a step will close it early; weak phrases while working are held, but a strong phrase ("shipped") about a sub-part is not.
