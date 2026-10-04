@@ -26,6 +26,7 @@ export interface SentMessage {
   sentAt: number;       // unix seconds
   state: MessageState;
   updatedAt: number;
+  reply?: string;       // what the agent answered, when we know
 }
 
 export type HostEvent =
@@ -224,18 +225,21 @@ export class OrchestratorHost extends EventEmitter {
     this.writeMessages(list);
   }
   /** The agent has effectively answered (we saw its finished turn), even if it did not message back. */
-  markDone(msgId: string) { this.setState(msgId, 'answered'); }
+  markDone(msgId: string, reply?: string) {
+    this.setState(msgId, 'answered');
+    if (reply) { const list = this.readMessages(); const m = list.find((x) => x.msgId === msgId); if (m) { m.reply = reply.slice(0, 400); this.writeMessages(list); } }
+  }
   private setState(msgId: string, state: MessageState) {
     const list = this.readMessages();
     const m = list.find((x) => x.msgId === msgId);
     if (m && m.state !== 'answered') { m.state = state; m.updatedAt = Math.floor(Date.now() / 1000); this.writeMessages(list); }
   }
-  private markAnswered(fromAddr: string, fromName: string) {
+  private markAnswered(fromAddr: string, fromName: string, reply?: string) {
     const list = this.readMessages();
     let changed = false;
     for (const m of list) {
       if (m.state === 'answered' || m.state === 'denied' || m.state === 'expired' || m.state === 'refused') continue;
-      if (m.to === fromAddr || (fromName && m.to === fromName)) { m.state = 'answered'; m.updatedAt = Math.floor(Date.now() / 1000); changed = true; }
+      if (m.to === fromAddr || (fromName && m.to === fromName)) { m.state = 'answered'; if (reply) m.reply = reply.slice(0, 400); m.updatedAt = Math.floor(Date.now() / 1000); changed = true; }
     }
     if (changed) this.writeMessages(list);
   }
@@ -277,7 +281,7 @@ export class OrchestratorHost extends EventEmitter {
     const peer = text.match(/<cross-session-message from="([^"]+)"(?: from-name="([^"]*)")?[^>]*>\s*([\s\S]*?)\s*<\/cross-session-message>/);
     if (peer) {
       const [, from, fromName = '', body] = peer;
-      this.markAnswered(from, fromName);
+      this.markAnswered(from, fromName, body);
       this.push({ kind: 'peer', from, fromName, text: body.slice(0, 600) });
     }
     // Real notices only: the SendMessage tool result also contains the phrase "[Cross-session delivery notice]"

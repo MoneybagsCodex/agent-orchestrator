@@ -18,7 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
-import { buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -162,6 +162,13 @@ app.get('/status', async (_req, res) => {
   } catch (e) { res.status(503).json({ error: `status unavailable: ${(e as Error).message}` }); }
 });
 
+/** GET /conversation/:sid?before=N&limit=N — the agent's full conversation, readable, newest last. */
+app.get('/conversation/:sid', async (req, res) => {
+  const before = req.query.before !== undefined ? Number(req.query.before) : undefined;
+  const limit = Math.min(Number(req.query.limit ?? 150) || 150, 400);
+  res.json(await conversationFor(req.params.sid, before, limit).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
+});
+
 /** POST /decide {id, decision} — Approve/Deny an item from the needs-you list. */
 app.post('/decide', async (req, res) => {
   const { id, decision } = req.body as { id?: string; decision?: 'approve' | 'deny' };
@@ -233,7 +240,7 @@ app.get('/history', (_req, res) => {
  */
 type Task = {
   id: string; sid: string; pid: number; title: string; text: string; transcript: string;
-  baseline: number; sentAt: number; status: 'waiting' | 'seen' | 'reported' | 'lost' | 'stalled'; blockedNotified?: boolean;
+  baseline: number; sentAt: number; status: 'waiting' | 'seen' | 'reported' | 'lost' | 'stalled'; blockedNotified?: boolean; reply?: string;
 };
 const TASKS_FILE = path.join(SESSIONS_DIR, 'tasks.json');
 const STALL_SECONDS = 20 * 60;
@@ -303,7 +310,7 @@ async function checkTasks() {
         persist();
         await sendAutoReport(`[auto-report] ${ctx} It is now blocked and waiting on a decision (a permission prompt). Use orch-read on it to see what it is asking. ${tail}`);
       } else if (replies.length && agentStatus !== 'busy' && agentStatus !== 'waiting' && ageSec >= 6) {
-        t.status = 'reported'; changed = true;
+        t.status = 'reported'; t.reply = replies.slice(-1)[0]?.slice(0, 400); changed = true;
         persist();
         await sendAutoReport(`[auto-report] ${ctx} It has finished and replied:\n\n${replies.slice(-3).join('\n\n').slice(0, 2500)}\n\n${tail}`);
       } else if (Date.now() / 1000 - t.sentAt > STALL_SECONDS) {

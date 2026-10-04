@@ -250,7 +250,7 @@ export async function buildStatus() {
     return {
       ...a, turns, doing, headline, outcome, stand: standFor(a.sid, turns), lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
-      tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt })),
+      tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt, reply: t.reply ?? '' })),
     };
   });
 
@@ -280,6 +280,63 @@ export async function buildStatus() {
   if (usage && usage.status && usage.status !== 'allowed') needs.push({ id: 'usage', kind: 'usage', title: 'Usage limit', detail: `Status: ${usage.status}${usage.resetsAt ? ` (resets ${new Date(usage.resetsAt * 1000).toLocaleTimeString()})` : ''}`, actions: [] });
 
   return { agents: enriched, summary, needsYou: needs, usage };
+}
+
+
+// ---------------------------------------------------------------- full conversation view
+export interface ConvItem { i: number; role: 'user' | 'assistant' | 'tool' | 'error' | 'system'; text: string; at: number }
+const convCache = new Map<string, { key: string; items: ConvItem[] }>();
+
+function parseConversation(file: string): ConvItem[] {
+  const st = fs.statSync(file);
+  const key = `${st.mtimeMs}-${st.size}`;
+  const hit = convCache.get(file);
+  if (hit && hit.key === key) return hit.items;
+  const items: ConvItem[] = [];
+  const add = (role: ConvItem['role'], text: string, at: number) => { if (text.trim()) items.push({ i: items.length, role, text, at }); };
+  for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+    if (!line.trim()) continue;
+    let e: any; try { e = JSON.parse(line); } catch { continue; }
+    if (e.isSidechain) continue;
+    const at = e.timestamp ? Math.floor(Date.parse(e.timestamp) / 1000) : 0;
+    const c = e.message?.content;
+    if (e.type === 'user') {
+      if (Array.isArray(c) && c.some((b: any) => b.type === 'tool_result')) {
+        for (const b of c) if (b.type === 'tool_result' && b.is_error) add('error', `Tool error: ${(Array.isArray(b.content) ? b.content.map((x: any) => x.text ?? '').join(' ') : String(b.content ?? '')).replace(/\s+/g, ' ').slice(0, 300)}`, at);
+        continue;
+      }
+      const text = textOf(c).trim();
+      if (!text) continue;
+      if (text.startsWith('<command-name>') || text.startsWith('<local-command')) { add('system', text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200), at); continue; }
+      if (text.startsWith('<') && !text.startsWith('<cross-session-message')) continue;
+      const pm = text.match(/<cross-session-message[^>]*from-name="([^"]*)"[^>]*>\s*([\s\S]*?)\s*<\/cross-session-message>/);
+      if (pm) { add('system', `Message from ${pm[1] || 'another session'}: ${pm[2].slice(0, 600)}`, at); continue; }
+      if (HOOK_RE.test(text)) { add('system', `Goal-loop feedback: ${text.replace(/\s+/g, ' ').slice(0, 200)}`, at); continue; }
+      add('user', text.slice(0, 4000), at);
+    } else if (e.type === 'assistant' && Array.isArray(c)) {
+      for (const b of c) {
+        if (b.type === 'text' && b.text?.trim()) add('assistant', b.text.slice(0, 6000), at);
+        else if (b.type === 'tool_use') add('tool', `${b.name}  ${b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.to ?? ''}`.trim().slice(0, 240), at);
+      }
+    } else if (e.type === 'system' && (e.subtype === 'local_command' || e.subtype === 'informational')) {
+      const t = String(e.content ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (t) add('system', t.slice(0, 200), at);
+    }
+  }
+  convCache.set(file, { key, items });
+  return items;
+}
+
+/** A page of an agent's full conversation, newest last. `before` is an item index: pass the first index you have to load earlier ones. */
+export async function conversationFor(sid: string, before?: number, limit = 150) {
+  const a = (await getAgents()).find((x: any) => x.sid === sid || (sid.length >= 6 && x.sid.startsWith(sid)));
+  if (!a) return { ok: false as const, message: 'That agent is no longer running.' };
+  const tr = transcriptFor(a.pid, a.sid);
+  if (!tr) return { ok: false as const, message: 'This agent has no transcript yet.' };
+  const all = parseConversation(tr);
+  const end = before === undefined ? all.length : Math.max(0, Math.min(before, all.length));
+  const start = Math.max(0, end - limit);
+  return { ok: true as const, title: a.topic || a.label, sid: a.sid, total: all.length, start, items: all.slice(start, end) };
 }
 
 // ---------------------------------------------------------------- decisions & quick actions
@@ -404,7 +461,7 @@ async function watch() {
       const t = [...(a.turns || [])].reverse().find((x: any) => !x.inProgress && x.endedAt >= m.sentAt && x.said && x.asked.includes(needle));
       if (!t) continue;
       reportedLedger.add(m.msgId);
-      deps.host.markDone(m.msgId);
+      deps.host.markDone(m.msgId, t.said);
       deps.host.sendSystem(`[agent-reply] "${a.topic || a.label}" [${a.sid.slice(0, 8)}] finished the turn handling your message ("${m.text.slice(0, 120)}") but did not message you back. Its last message was: "${t.said}". Tell the user what it said, in plain words, naming the agent. Do not message any agent now.`);
     }
     const u = status.usage;
