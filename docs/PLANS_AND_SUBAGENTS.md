@@ -160,10 +160,10 @@ When a routed agent *says* work still needs doing, the server turns it into a pl
 | Case | Behaviour |
 |---|---|
 | Already planned | Skipped if most of the shorter title's words appear in any existing step of the plan (so "Add retry" matches "Add retry logic to the spawn path"). Logged as `skipped: already planned as <id>`. |
-| Vague ("we need it", "do something", "more work") | Skipped: title under 12 characters or 3 words, or fewer than 2 meaningful words. |
+| Vague ("we need it", "do something", "more work") | Skipped: title under 12 characters or 2 words, or fewer than 2 meaningful words. |
 | Negated or hedged ("we don't need", "if we need", "maybe", "might need") | Skipped. |
 | Questions | Skipped (sentence ends with `?`). |
-| Code blocks, quotes | Ignored. Inline code keeps its text. |
+| Code blocks, quotes, table rows, "quoted examples" | Ignored. Inline code keeps its text. |
 | Floods | At most 3 per message, 6 per agent per hour, and nothing once the plan holds 36 of its 40 steps. |
 | Agent not routed | Nothing is added (same rule as section 2). |
 

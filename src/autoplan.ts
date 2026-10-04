@@ -23,12 +23,13 @@ const VAGUE_WORDS = new Set(['it', 'that', 'this', 'them', 'those', 'these', 'so
 const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'and', 'in', 'on', 'with', 'is', 'are', 'be', 'we', 'i', 'it', 'that', 'this', 'also', 'then', 'so', 'as', 'at', 'by', 'from']);
 
 export const MIN_TITLE_CHARS = 12;
-export const MIN_TITLE_WORDS = 3;
+export const MIN_TITLE_WORDS = 2;
 export const MAX_PER_MESSAGE = 3;
 
 /** Strip fenced and inline code and blockquotes so only the agent's own prose is scanned. */
 function prose(text: string): string {
-  return text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, (m) => m.slice(1, -1)).replace(/^\s*>.*$/gm, ' ');
+  return text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, (m) => m.slice(1, -1)).replace(/^\s*(?:>|\|).*$/gm, ' ')
+    .replace(/["\u201c][^"\u201c\u201d\n]{0,240}["\u201d]/g, ' ');   // quoted examples and table rows are discussion of work, not new work
 }
 
 function sentences(text: string): string[] {
