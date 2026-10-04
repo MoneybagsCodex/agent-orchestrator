@@ -284,7 +284,7 @@ export async function buildStatus() {
 
 
 // ---------------------------------------------------------------- full conversation view
-export interface ConvItem { i: number; role: 'user' | 'assistant' | 'tool' | 'error' | 'system'; text: string; at: number }
+export interface ConvItem { i: number; role: 'user' | 'assistant' | 'tool' | 'error' | 'system' | 'recv' | 'sent'; text: string; at: number; who?: string }
 const convCache = new Map<string, { key: string; items: ConvItem[] }>();
 
 function parseConversation(file: string): ConvItem[] {
@@ -293,7 +293,7 @@ function parseConversation(file: string): ConvItem[] {
   const hit = convCache.get(file);
   if (hit && hit.key === key) return hit.items;
   const items: ConvItem[] = [];
-  const add = (role: ConvItem['role'], text: string, at: number) => { if (text.trim()) items.push({ i: items.length, role, text, at }); };
+  const add = (role: ConvItem['role'], text: string, at: number, who?: string) => { if (text.trim()) items.push({ i: items.length, role, text, at, who }); };
   for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
     if (!line.trim()) continue;
     let e: any; try { e = JSON.parse(line); } catch { continue; }
@@ -310,12 +310,13 @@ function parseConversation(file: string): ConvItem[] {
       if (text.startsWith('<command-name>') || text.startsWith('<local-command')) { add('system', text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200), at); continue; }
       if (text.startsWith('<') && !text.startsWith('<cross-session-message')) continue;
       const pm = text.match(/<cross-session-message[^>]*from-name="([^"]*)"[^>]*>\s*([\s\S]*?)\s*<\/cross-session-message>/);
-      if (pm) { add('system', `Message from ${pm[1] || 'another session'}: ${pm[2].slice(0, 600)}`, at); continue; }
+      if (pm) { add('recv', pm[2].slice(0, 2000), at, pm[1] || 'another session'); continue; }
       if (HOOK_RE.test(text)) { add('system', `Goal-loop feedback: ${text.replace(/\s+/g, ' ').slice(0, 200)}`, at); continue; }
       add('user', text.slice(0, 4000), at);
     } else if (e.type === 'assistant' && Array.isArray(c)) {
       for (const b of c) {
         if (b.type === 'text' && b.text?.trim()) add('assistant', b.text.slice(0, 6000), at);
+        else if (b.type === 'tool_use' && b.name === 'SendMessage') add('sent', String(b.input?.message ?? '').slice(0, 2000), at, String(b.input?.to ?? ''));
         else if (b.type === 'tool_use') add('tool', `${b.name}  ${b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.to ?? ''}`.trim().slice(0, 240), at);
       }
     } else if (e.type === 'system' && (e.subtype === 'local_command' || e.subtype === 'informational')) {
