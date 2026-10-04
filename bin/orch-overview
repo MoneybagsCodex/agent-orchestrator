@@ -11,4 +11,5 @@ curl -sf "$ORCH/overview${1:+?threshold=$1}" | jq -r '
     (if .plan.owned > 0 then "  plan steps: \(.plan.done)/\(.plan.owned) done (\(.plan.percent)%): \(.plan.steps|join(", "))" else "  plan steps: none assigned" end),
     (if (.recentErrors|length) > 0 then "  recent errors: \(.recentErrors|join(" | ")[0:300])" else empty end),
     (if (.needsYou|length) > 0 then "  NEEDS YOU: \(.needsYou|join("; "))" else empty end)),
+  (if (.workers|length) > 0 then "DELEGATED WORKERS (subagents, no terminal):", (.workers[] | "  \(.label // .id) [\(.status)] \(.kind // "")" + (if .branch then " branch \(.branch)" else "" end) + (if .note then ": \(.note)" else "" end)) else empty end),
   (if .plan then "PLAN \(.plan.title): \(.plan.percent)% done", (.plan.steps[] | "  [\(.status)] \(.id): \(.title) — owner: \(.owner // "unassigned")" + (if (.deps|length)>0 then " (after \(.deps|join(", ")))" else "" end)) else "No plan set." end)'

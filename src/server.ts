@@ -445,10 +445,29 @@ app.get('/overview', async (req, res) => {
   });
   const unowned = nodes.filter((n) => !ownerOf(n)).map((n) => n.id);
   res.json({
-    at: Math.floor(Date.now() / 1000), agents, usage: st.usage,
+    at: Math.floor(Date.now() / 1000), agents, usage: st.usage, workers: readWorkers().filter((w) => w.status === 'running' || Date.now() / 1000 - (w.endedAt ?? 0) < 3600),
     plan: plan ? { title: plan.title, steps: nodes.map((n) => ({ id: n.id, title: n.title, status: n.status, deps: n.deps, owner: ownerOf(n)?.topic ?? ownerOf(n)?.label ?? null })),
       percent: nodes.length ? Math.round((nodes.filter((n) => n.status === 'done').length / nodes.length) * 100) : 0, unownedSteps: unowned } : null,
   });
+});
+// ---- Delegated workers: subagents the lead session spawns. They have no terminal, so they never show up as agents;
+// this small registry is how the dashboard and the orchestrator can still see that they exist and what state they are in.
+const WORKERS_FILE = path.join(SESSIONS_DIR, 'workers.json');
+const readWorkers = (): any[] => { try { return JSON.parse(fs.readFileSync(WORKERS_FILE, 'utf-8')); } catch { return []; } };
+app.get('/workers', (_req, res) => res.json({ workers: readWorkers() }));
+app.post('/workers', (req, res) => {
+  const b = req.body ?? {}; const id = String(b.id ?? '').slice(0, 40);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  const STATUSES = ['running', 'done', 'failed', 'cancelled'];
+  if (b.status !== undefined && !STATUSES.includes(b.status)) return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
+  const list = readWorkers(); const nowS = Math.floor(Date.now() / 1000);
+  let w = list.find((x) => x.id === id);
+  if (!w) { w = { id, startedAt: nowS, status: 'running' }; list.push(w); }
+  for (const k of ['label', 'kind', 'branch', 'worktree', 'note'] as const) if (b[k] !== undefined) w[k] = String(b[k]).slice(0, 300);
+  if (b.status !== undefined) { w.status = b.status; if (b.status !== 'running') w.endedAt = nowS; }
+  w.updatedAt = nowS;
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(WORKERS_FILE, JSON.stringify(list.slice(-30), null, 2));
+  res.json({ ok: true, worker: w });
 });
 app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));
 
