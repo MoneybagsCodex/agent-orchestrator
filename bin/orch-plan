@@ -1,16 +1,33 @@
 #!/bin/bash
-# The plan graph shown on the dashboard. show | set '<json>' | node <id> <status> [note] | owner <id> <agent-id|none> | clear
+# Plans, one per domain, plus the routing table that says which agent's work goes to which plan.
+#   orch-plan plans                                  list plans and which agents are routed where
+#   orch-plan new <plan> "<title>" ["<domain>"]      create an empty plan (id: lowercase letters, digits, dashes)
+#   orch-plan show [plan]                            show one plan, or all of them
+#   orch-plan set <plan> '<json>'                    replace a plan's steps: {"nodes":[{"id","title","deps","status","sid"}]}
+#   orch-plan node [plan/]<id> <status> [note]       status: todo|active|done|blocked|decide
+#   orch-plan owner [plan/]<id> <agent-id|none>      assign a step to an agent
+#   orch-plan assign <agent-id> <plan|none>          route an agent: its "Step N:" tasks land in that plan
+#   orch-plan clear <plan>                           delete a plan
 ORCH="${ORCH_URL:-http://localhost:3003}"
+post() { curl -s -X POST "$ORCH$1" -H 'Content-Type: application/json' -d "$2"; echo; }
+split_ref() { if [[ "$1" == */* ]]; then P="${1%%/*}"; N="${1#*/}"; else P=""; N="$1"; fi; }
+fmt='(.title + "  [" + .id + "]"), (.nodes[] | "  [\(.status)] \(.id): \(.title)" + (if (.deps|length)>0 then "  (after: \(.deps|join(", ")))" else "" end))'
 case "$1" in
-  show) curl -sf "$ORCH/plan" | jq -r '.plan // "No plan set." | if type=="string" then . else (.title, (.nodes[] | "  [\(.status)] \(.id): \(.title)" + (if (.deps|length)>0 then "  (after: \(.deps|join(", ")))" else "" end))) end' ;;
-  set) [[ -z "$2" ]] && { echo "usage: orch-plan set '<json>'"; exit 1; }
-       curl -s -X POST "$ORCH/plan" -H 'Content-Type: application/json' -d "$2" ;;
-  node) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan node <id> <status> [note]"; exit 1; }
-       curl -s -X POST "$ORCH/plan/node" -H 'Content-Type: application/json' -d "$(jq -n --arg id "$2" --arg s "$3" --arg n "$4" 'if $n=="" then {id:$id,status:$s} else {id:$id,status:$s,note:$n} end')" ;;
-  owner) [[ -z "$2" ]] && { echo "usage: orch-plan owner <id> <agent-id|none>"; exit 1; }
-       sid="$3"; [[ "$sid" == none ]] && sid=""
-       curl -s -X POST "$ORCH/plan/node" -H 'Content-Type: application/json' -d "$(jq -n --arg id "$2" --arg s "$sid" '{id:$id,sid:$s}')" ;;
-  clear) curl -s -X DELETE "$ORCH/plan" ;;
-  *) echo "usage: orch-plan show | set '<json>' | node <id> <status> [note] | owner <id> <agent-id|none> | clear"; exit 1 ;;
+  plans) curl -sf "$ORCH/plans" | jq -r '(.plans[] | "\(.id): \(.title) (\(.nodes|length) steps)"), "routing: " + (if (.routing.agents|length)>0 then (.routing.agents | to_entries | map("\(.key) -> \(.value)") | join(", ")) else "none" end)' ;;
+  new) [[ -z "$2" || -z "$3" ]] && { echo 'usage: orch-plan new <plan> "<title>" ["<domain>"]'; exit 1; }
+       post /plans "$(jq -n --arg id "$2" --arg t "$3" --arg d "$4" '{id:$id,title:$t,domain:$d}')" ;;
+  show) if [[ -n "$2" ]]; then curl -sf "$ORCH/plan?plan=$2" | jq -r ".plan // \"No plan $2.\" | if type==\"string\" then . else ($fmt) end"
+        else curl -sf "$ORCH/plans" | jq -r ".plans[] | ($fmt), \"\""; fi ;;
+  set) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan set <plan> '<json>'  (plans: $(curl -sf "$ORCH/plans" | jq -r '[.plans[].id]|join(" | ")'))"; exit 1; }
+       post /plan "$(jq -c --arg p "$2" '. + {plan:$p}' <<<"$3")" ;;
+  node) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan node [plan/]<id> <status> [note]"; exit 1; }
+       split_ref "$2"; post /plan/node "$(jq -n --arg p "$P" --arg id "$N" --arg s "$3" --arg n "$4" '{id:$id,status:$s} + (if $p!="" then {plan:$p} else {} end) + (if $n!="" then {note:$n} else {} end)')" ;;
+  owner) [[ -z "$2" ]] && { echo "usage: orch-plan owner [plan/]<id> <agent-id|none>"; exit 1; }
+       split_ref "$2"; sid="$3"; [[ "$sid" == none ]] && sid=""
+       post /plan/node "$(jq -n --arg p "$P" --arg id "$N" --arg s "$sid" '{id:$id,sid:$s} + (if $p!="" then {plan:$p} else {} end)')" ;;
+  assign) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan assign <agent-id> <plan|none>"; exit 1; }
+       post /routing "$(jq -n --arg a "$2" --arg p "$3" '{agent:$a,plan:$p}')" ;;
+  clear) [[ -z "$2" ]] && { echo "usage: orch-plan clear <plan>"; exit 1; }
+       curl -s -X DELETE "$ORCH/plan?plan=$2"; echo ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
-echo

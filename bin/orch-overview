@@ -8,8 +8,9 @@ curl -sf "$ORCH/overview${1:+?threshold=$1}" | jq -r '
     "  task: \(.task[0:140])",
     (if .tokens then "  tokens: in \(.tokens.input|k), out \(.tokens.output|k), cache read \(.tokens.cacheRead|k), \(.tokens.perHour|k)/hr" else empty end),
     (if .context then "  context: \(if .context.justCompacted then "just compacted" else (.context.tokens|k) end) / flag at \(.context.threshold|k)\(if .context.over then "  OVER THRESHOLD" else "" end)" else empty end),
-    (if .plan.owned > 0 then "  plan steps: \(.plan.done)/\(.plan.owned) done (\(.plan.percent)%): \(.plan.steps|join(", "))" else "  plan steps: none assigned" end),
+    (if .plan.owned > 0 then "  plan steps: \(.plan.done)/\(.plan.owned) done (\(.plan.percent)%): \(.plan.steps|join(", "))" else "  plan steps: none assigned" end) + (if .plan.routedTo then "  [routed to plan: \(.plan.routedTo)]" else "  [NOT ROUTED to a plan]" end),
     (if (.recentErrors|length) > 0 then "  recent errors: \(.recentErrors|join(" | ")[0:300])" else empty end),
     (if (.needsYou|length) > 0 then "  NEEDS YOU: \(.needsYou|join("; "))" else empty end)),
   (if (.workers|length) > 0 then "DELEGATED WORKERS (subagents, no terminal):", (.workers[] | "  \(.label // .id) [\(.status)] \(.kind // "")" + (if .branch then " branch \(.branch)" else "" end) + (if .note then ": \(.note)" else "" end)) else empty end),
-  (if .plan then "PLAN \(.plan.title): \(.plan.percent)% done", (.plan.steps[] | "  [\(.status)] \(.id): \(.title) — owner: \(.owner // "unassigned")" + (if (.deps|length)>0 then " (after \(.deps|join(", ")))" else "" end)) else "No plan set." end)'
+  (.plans[] | "PLAN \(.title) [\(.id)]: \(.percent)% done", (.steps[] | "  [\(.status)] \(.id): \(.title) — owner: \(.owner // "unassigned")" + (if (.deps|length)>0 then " (after \(.deps|join(", ")))" else "" end))),
+  (if (.unroutedAgents|length) > 0 then "NOT ROUTED TO ANY PLAN (their Step N tasks will not be tracked): \(.unroutedAgents|join(", ")). Fix: orch-plan assign <agent-id> <plan>" else empty end)'

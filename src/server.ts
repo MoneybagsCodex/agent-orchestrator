@@ -76,7 +76,7 @@ You are the user's master orchestrator. The user talks to you in plain language 
 You can ONLY act through these commands (run them with Bash, exactly as written):
 - orch-status                        START HERE for "what's going on / what is X doing". One digest per agent: state (WORKING / IDLE / BLOCKED on a decision), what it last said, what it was last asked, and notes (e.g. a /goal loop makes idle/busy flicker; that is normal for that agent, not a fault). Report these in plain words; never dump raw output at the user.
 - orch-usage                         the user's real usage-limit status and reset time. For ANY question about usage, limits or what is left, use only this.
-- orch-plan show | set '<json>' | node <id> <todo|active|done|blocked|decide> [note] | clear   the dependency graph the user sees on their dashboard. For multi-step work, set a plan ({"title":...,"nodes":[{"id":"a","title":"...","deps":[],"status":"todo","sid":"<agent id, optional>"}]}); mark a node decide when it needs the user's choice, and update node statuses as agents report. Never mark a node done unless an agent reported it.
+- orch-plan plans | new <plan> "<title>" | show [plan] | set <plan> '<json>' | node [plan/]<id> <status> [note] | owner [plan/]<id> <agent|none> | assign <agent-id> <plan|none> | clear <plan>   PLANS ARE SEPARATE PER DOMAIN (orb-brawl = the game, orchestrator = this system's infrastructure, ui = dashboard visuals). Always name the plan; there is no default. A "Step N:" task you send to an agent is added automatically to the plan that agent is ROUTED to (see orch-plan plans); if the agent is not routed it is NOT tracked, so run orch-plan assign first. Never put one domain's work in another domain's plan. Mark a node decide when it needs the user's choice; never mark a node done unless an agent reported it.
 - orch-overview [threshold]          ALL agents and ALL plan steps in one view: state, task, tokens, context vs its flag, plan progress per agent, recent errors, what needs the user. Use this for broad questions (how is everything going, who is working on what, what is blocked). It reads local data and does not message the agents.
 - orch-list                          quick list of live terminals: label, short id, uptime
 - orch-read <id|title> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
@@ -349,15 +349,32 @@ setInterval(checkTasks, 4000);
 
 /** GET /tasks — delegations the orchestrator is tracking (for the UI). */
 
-// ---- Plan: a small dependency graph the orchestrator maintains and the dashboard draws ----
-const PLAN_FILE = path.join(SESSIONS_DIR, 'plan.json');
+// ---- Plans: one dependency graph PER DOMAIN (orb-brawl, orchestrator, ui, ...), plus a routing table ----
+// A step always lands in the plan its owner is routed to. Nothing defaults to a plan: an unrouted agent or a missing plan id is an
+// error the caller must fix, because a silent default is how orchestrator work ended up in the game roadmap.
+const PLANS_DIR = path.join(SESSIONS_DIR, 'plans');
+const ROUTING_FILE = path.join(SESSIONS_DIR, 'routing.json');
 const PLAN_STATUS = ['todo', 'active', 'done', 'blocked', 'decide'];
-const readPlan = () => { try { return JSON.parse(fs.readFileSync(PLAN_FILE, 'utf-8')); } catch { return null; } };
-const writePlan = (p: any) => { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(PLAN_FILE, JSON.stringify(p, null, 2)); };
+const PLAN_ID_RE = /^[a-z0-9][a-z0-9-]{1,29}$/;
+const planFile = (id: string) => path.join(PLANS_DIR, `${id}.json`);
+const readPlan = (id: string): any => { if (!PLAN_ID_RE.test(id)) return null; try { return JSON.parse(fs.readFileSync(planFile(id), 'utf-8')); } catch { return null; } };
+const writePlan = (p: any) => { fs.mkdirSync(PLANS_DIR, { recursive: true }); fs.writeFileSync(planFile(p.id), JSON.stringify(p, null, 2)); };
+const listPlans = (): any[] => { try { return fs.readdirSync(PLANS_DIR).filter((f) => f.endsWith('.json')).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(PLANS_DIR, f), 'utf-8')); } catch { return null; } }).filter(Boolean).sort((x: any, y: any) => (x.order ?? 99) - (y.order ?? 99) || x.id.localeCompare(y.id)); } catch { return []; } };
+const readRouting = (): { agents: Record<string, string> } => { try { const r = JSON.parse(fs.readFileSync(ROUTING_FILE, 'utf-8')); return { agents: r.agents ?? {} }; } catch { return { agents: {} }; } };
+const planIdsHint = () => listPlans().map((p) => p.id).join(' | ') || '(no plans yet: create one with orch-plan new)';
+const planForAgent = (sid: string): string | null => { const id = readRouting().agents[sid.slice(0, 8)]; return id && readPlan(id) ? id : null; };
+/** Find a node by id: in the named plan, or across all plans when none is named (an id that exists in several plans is ambiguous). */
+function findNode(planId: string | undefined, nodeId: string): { plan?: any; node?: any; error?: string } {
+  if (planId) { const plan = readPlan(planId); if (!plan) return { error: `no plan "${planId}" (plans: ${planIdsHint()})` }; const node = plan.nodes.find((n: any) => n.id === nodeId); return node ? { plan, node } : { error: `no step ${nodeId} in plan ${planId}` }; }
+  const hits = listPlans().flatMap((p) => p.nodes.filter((n: any) => n.id === nodeId).map((node: any) => ({ plan: p, node })));
+  if (hits.length === 1) return hits[0];
+  return { error: hits.length ? `step ${nodeId} exists in several plans (${hits.map((h) => h.plan.id).join(', ')}): name one` : `no step ${nodeId} in any plan` };
+}
+
 // ---- Auto-register plan steps from task messages ("Step 2: add a laser") ----
-// Called for both send paths: orch-send (keystrokes) and the orchestrator's SendMessage tool. One step per agent and step
-// number (re-sending the same step updates it instead of duplicating); each step chains after that agent's previous step.
-const STEP_RE = /^\s*(?:\*\*|#+\s*)?step\s+(\d{1,3})\s*[:.)\u2013\u2014-]\s*(.+)/is;
+// Called for both send paths: orch-send (keystrokes) and the orchestrator's SendMessage tool. The step goes into the plan the TARGET
+// AGENT is routed to; one step per agent and step number (re-sending updates it); each step chains after that agent's previous step.
+const STEP_RE = /^\s*(?:\*\*|#+\s*)?step\s+(\d{1,3})\s*[:.)–—-]\s*(.+)/is;
 export function parseStep(text: string): { n: number; title: string } | null {
   const m = String(text).match(STEP_RE); if (!m) return null;
   const title = m[2].split(/\n|(?<=[.!?])\s/)[0].replace(/\*\*/g, '').trim().slice(0, 100);
@@ -370,16 +387,18 @@ async function registerStep(target: { sid?: string; to?: string }, text: string)
   const a: any = agents.find((x: any) => (target.sid && x.sid === target.sid) || (t && (x.peer === t || x.name === t || t === `uds:/tmp/cc-socks/${x.pid}.sock`)));
   if (!a) return 'target is not a known agent';
   const owner = a.sid.slice(0, 8), id = `${owner}-s${step.n}`, nowS = Date.now() / 1000;
-  const plan = readPlan() ?? { title: 'Plan', nodes: [] as any[], updatedAt: nowS };
+  const planId = planForAgent(a.sid);
+  if (!planId) return `NOT ADDED: agent ${owner} is not routed to any plan. Route it with: orch-plan assign ${owner} <plan> (plans: ${planIdsHint()})`;
+  const plan = readPlan(planId);
   const existing = plan.nodes.find((n: any) => n.id === id);
   if (existing) { existing.title = step.title; if (existing.status === 'done') { existing.status = 'active'; existing.statusAt = nowS; delete existing.doneAt; } }
   else {
-    if (plan.nodes.length >= 40) return 'plan is full (40 steps)';
+    if (plan.nodes.length >= 40) return `plan ${planId} is full (40 steps)`;
     const prev = plan.nodes.filter((n: any) => n.sid === owner && typeof n.step === 'number' && n.step < step.n).sort((x: any, y: any) => y.step - x.step)[0];
     plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, step: step.n, statusAt: nowS, startedAt: nowS });
   }
   plan.updatedAt = nowS; writePlan(plan);
-  return `${existing ? 'updated' : 'added'} plan step ${id}: ${step.title}`;
+  return `${existing ? 'updated' : 'added'} step ${id} in plan ${planId}: ${step.title}`;
 }
 app.post('/plan/auto', async (req, res) => {
   try { res.json({ ok: true, result: await registerStep({ sid: req.body?.sid, to: req.body?.to }, String(req.body?.text ?? '')) }); }
@@ -387,9 +406,32 @@ app.post('/plan/auto', async (req, res) => {
 });
 host.on('sent-message', (m: { to: string; text: string }) => { registerStep({ to: m.to }, m.text).then((r) => { if (!r.startsWith('not a step')) console.log('[plan-auto]', r); }).catch(() => { /* best effort */ }); });
 
-app.get('/plan', (_req, res) => res.json({ plan: readPlan() }));
+app.get('/plans', (_req, res) => res.json({ plans: listPlans(), routing: readRouting() }));
+app.post('/plans', (req, res) => {
+  const id = String(req.body?.id ?? ''), title = String(req.body?.title ?? '').slice(0, 120);
+  if (!PLAN_ID_RE.test(id)) return res.status(400).json({ error: 'plan id: 2-30 chars, lowercase letters, digits and dashes' });
+  if (!title) return res.status(400).json({ error: 'title required' });
+  if (readPlan(id)) return res.status(409).json({ error: `plan ${id} already exists` });
+  writePlan({ id, title, domain: String(req.body?.domain ?? '').slice(0, 200), order: listPlans().length + 1, nodes: [], updatedAt: Date.now() / 1000 });
+  res.json({ ok: true, id });
+});
+app.get('/routing', (_req, res) => res.json({ ...readRouting(), plans: listPlans().map((p) => p.id) }));
+app.post('/routing', (req, res) => {
+  const agent = String(req.body?.agent ?? '').slice(0, 8), plan = String(req.body?.plan ?? '');
+  if (agent.length < 4) return res.status(400).json({ error: 'agent: at least 4 characters of the agent id' });
+  const r = readRouting();
+  if (plan === 'none') delete r.agents[agent];
+  else { if (!readPlan(plan)) return res.status(400).json({ error: `no plan "${plan}" (plans: ${planIdsHint()})` }); r.agents[agent] = plan; }
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
+  res.json({ ok: true, routing: r });
+});
+
+app.get('/plan', (req, res) => { const id = String(req.query.plan ?? ''); res.json({ plan: readPlan(id), plans: listPlans().map((p) => p.id) }); });
 app.post('/plan', (req, res) => {
-  const { title, nodes } = req.body ?? {};
+  const planId = String(req.body?.plan ?? ''); const { title, nodes } = req.body ?? {};
+  if (!planId) return res.status(400).json({ error: `which plan? pass plan (one of: ${planIdsHint()})` });
+  const existing = readPlan(planId);
+  if (!existing && !(PLAN_ID_RE.test(planId) && title)) return res.status(400).json({ error: `no plan "${planId}" (plans: ${planIdsHint()}); to create it send a title too` });
   if (!Array.isArray(nodes) || !nodes.length || nodes.length > 40) return res.status(400).json({ error: 'nodes must be a list of 1-40 items' });
   const ids = new Set<string>();
   const clean: any[] = [];
@@ -398,28 +440,29 @@ app.post('/plan', (req, res) => {
     if (!id || ids.has(id)) return res.status(400).json({ error: `missing or duplicate node id: ${id || '(empty)'}` });
     ids.add(id);
     clean.push({ id, title: String(n.title ?? id).slice(0, 120), deps: Array.isArray(n.deps) ? n.deps.map(String) : [],
-      status: PLAN_STATUS.includes(n.status) ? n.status : 'todo', sid: n.sid ? String(n.sid) : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
+      status: PLAN_STATUS.includes(n.status) ? n.status : 'todo', sid: n.sid ? String(n.sid) : undefined, worker: n.worker ? String(n.worker).slice(0, 40) : undefined,
+      step: typeof n.step === 'number' ? n.step : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
   }
   for (const n of clean) {
     const bad = n.deps.find((d: string) => !ids.has(d) || d === n.id);
     if (bad) return res.status(400).json({ error: `node ${n.id} depends on unknown or itself: ${bad}` });
   }
   // Keep each step's timeline: when its status last changed, carried over if the step and status are unchanged.
-  const prev = readPlan(); const nowS = Date.now() / 1000;
-  for (const n of clean) { const o = prev?.nodes?.find((x: any) => x.id === n.id); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
-  writePlan({ title: String(title ?? 'Plan').slice(0, 120), nodes: clean, updatedAt: nowS });
-  res.json({ ok: true, nodes: clean.length });
+  const nowS = Date.now() / 1000;
+  for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
+  writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, nodes: clean, updatedAt: nowS });
+  res.json({ ok: true, plan: planId, nodes: clean.length });
 });
 app.post('/plan/node', (req, res) => {
-  const p = readPlan(); const { id, status, note, sid } = req.body ?? {};
-  const n = p?.nodes.find((x: any) => x.id === id);
-  if (!n) return res.status(404).json({ error: `no plan node ${id}` });
+  const { plan: planId, id, status, note, sid } = req.body ?? {};
+  const f = findNode(planId, String(id ?? '')); if (f.error) return res.status(404).json({ error: f.error });
+  const { plan: p, node: n } = f;
   if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
   if (sid !== undefined) n.sid = sid ? String(sid).slice(0, 40) : undefined;   // owner agent: session id prefix, empty clears
-  p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true });
+  p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true, plan: p.id });
 });
-app.delete('/plan', (_req, res) => { try { fs.unlinkSync(PLAN_FILE); } catch { /* none */ } res.json({ ok: true }); });
+app.delete('/plan', (req, res) => { const id = String(req.query.plan ?? ''); if (!readPlan(id)) return res.status(404).json({ error: `no plan "${id}"` }); fs.unlinkSync(planFile(id)); res.json({ ok: true }); });
 
 app.get('/costs', (_req, res) => res.json(costsSummary()));
 // ---- Overview: every agent and every plan step in ONE response, built from one local snapshot ----
@@ -428,8 +471,8 @@ app.get('/costs', (_req, res) => res.json(costsSummary()));
 app.get('/overview', async (req, res) => {
   const threshold = Number(req.query.threshold) >= 10000 ? Number(req.query.threshold) : 150000;
   const st: any = await buildStatus();
-  const plan = readPlan();
-  const nodes: any[] = plan?.nodes ?? [];
+  const plans = listPlans(); const routing = readRouting();
+  const nodes: any[] = plans.flatMap((p) => p.nodes.map((n: any) => ({ ...n, plan: p.id })));
   const ownerOf = (n: any) => (n.sid ? st.agents.find((a: any) => a.sid.startsWith(n.sid)) : undefined);
   const agents = st.agents.map((a: any) => {
     const steps = nodes.filter((n) => ownerOf(n) === a);
@@ -439,15 +482,17 @@ app.get('/overview', async (req, res) => {
       activity: a.activity ? { phase: a.activity.phase, tool: a.activity.tool, steps: a.activity.steps, seconds: Math.round(Date.now() / 1000 - a.activity.turnStart) } : null,
       tokens: a.tokens ? { input: a.tokens.input, output: a.tokens.output, cacheRead: a.tokens.cacheRead, total: a.tokens.total, perHour: a.tokens.perHour } : null,
       context: a.tokens ? { tokens: a.tokens.context, threshold, over: a.tokens.context > threshold, justCompacted: !!a.tokens.compactedAt && !a.tokens.context } : null,
-      plan: { owned: steps.length, done, percent: steps.length ? Math.round((done / steps.length) * 100) : null, steps: steps.map((n) => n.id) },
+      plan: { owned: steps.length, done, percent: steps.length ? Math.round((done / steps.length) * 100) : null, steps: steps.map((n) => `${n.plan}/${n.id}`), routedTo: routing.agents[a.sid.slice(0, 8)] ?? null },
       recentErrors: (a.recentErrors ?? []).map((e: any) => e.text), needsYou: st.needsYou.filter((x: any) => x.sid === a.sid).map((x: any) => x.title),
     };
   });
-  const unowned = nodes.filter((n) => !ownerOf(n)).map((n) => n.id);
+  const workerLabel = (id: string) => (readWorkers().find((w) => w.id === id)?.label ?? id) + ' (subagent)';
   res.json({
     at: Math.floor(Date.now() / 1000), agents, usage: st.usage, workers: readWorkers().filter((w) => w.status === 'running' || Date.now() / 1000 - (w.endedAt ?? 0) < 3600),
-    plan: plan ? { title: plan.title, steps: nodes.map((n) => ({ id: n.id, title: n.title, status: n.status, deps: n.deps, owner: ownerOf(n)?.topic ?? ownerOf(n)?.label ?? null })),
-      percent: nodes.length ? Math.round((nodes.filter((n) => n.status === 'done').length / nodes.length) * 100) : 0, unownedSteps: unowned } : null,
+    plans: plans.map((p) => ({ id: p.id, title: p.title, domain: p.domain ?? '', percent: p.nodes.length ? Math.round((p.nodes.filter((n: any) => n.status === 'done').length / p.nodes.length) * 100) : 0,
+      unownedSteps: p.nodes.filter((n: any) => !ownerOf(n) && !n.worker).map((n: any) => n.id),
+      steps: p.nodes.map((n: any) => ({ id: n.id, title: n.title, status: n.status, deps: n.deps, owner: ownerOf(n)?.topic ?? ownerOf(n)?.label ?? (n.worker ? workerLabel(n.worker) : null) })) })),
+    unroutedAgents: agents.filter((a: any) => !a.plan.routedTo).map((a: any) => a.id),
   });
 });
 // ---- Delegated workers: subagents the lead session spawns. They have no terminal, so they never show up as agents;
@@ -458,7 +503,7 @@ app.get('/workers', (_req, res) => res.json({ workers: readWorkers() }));
 app.post('/workers', (req, res) => {
   const b = req.body ?? {}; const id = String(b.id ?? '').slice(0, 40);
   if (!id) return res.status(400).json({ error: 'id required' });
-  const STATUSES = ['running', 'done', 'failed', 'cancelled'];
+  const STATUSES = ['running', 'review', 'done', 'failed', 'cancelled'];
   if (b.status !== undefined && !STATUSES.includes(b.status)) return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
   const list = readWorkers(); const nowS = Math.floor(Date.now() / 1000);
   let w = list.find((x) => x.id === id);
@@ -466,6 +511,22 @@ app.post('/workers', (req, res) => {
   for (const k of ['label', 'kind', 'branch', 'worktree', 'note'] as const) if (b[k] !== undefined) w[k] = String(b[k]).slice(0, 300);
   if (b.status !== undefined) { w.status = b.status; if (b.status !== 'running') w.endedAt = nowS; }
   w.updatedAt = nowS;
+  // Pattern: every delegated worker that matters has a plan step; its status drives the step so the roadmap never disagrees with it.
+  const STEP_OF: Record<string, string> = { running: 'active', review: 'active', done: 'done', failed: 'blocked', cancelled: 'todo' };
+  let plan: any = listPlans().find((p) => p.nodes.some((n: any) => n.worker === id)) ?? null;
+  let node = plan?.nodes.find((n: any) => n.worker === id);
+  if (!node && b.stepTitle) {
+    plan = readPlan(String(b.plan ?? ''));
+    if (!plan) return res.status(400).json({ error: `stepTitle needs plan: which plan does this worker belong to? (plans: ${planIdsHint()})` });
+    if (plan.nodes.length >= 40) return res.status(400).json({ error: `plan ${plan.id} is full (40 steps)` });
+    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, statusAt: nowS, startedAt: nowS };
+    plan.nodes.push(node);
+  }
+  if (node && b.status !== undefined && node.status !== STEP_OF[w.status]) {
+    node.status = STEP_OF[w.status]; node.statusAt = nowS; if (node.status === 'done') node.doneAt = nowS;
+  }
+  if (node) { node.note = w.status === 'review' ? 'awaiting lead review' : w.status === 'failed' ? (w.note || 'worker failed') : node.note; plan.updatedAt = nowS; writePlan(plan); }
+  if (b.status !== undefined && ['review', 'done', 'failed'].includes(b.status)) host.notify({ level: b.status === 'failed' ? 'warn' : 'info', title: `${w.label || id}: ${b.status}`, text: w.note || '' });
   fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(WORKERS_FILE, JSON.stringify(list.slice(-30), null, 2));
   res.json({ ok: true, worker: w });
 });
