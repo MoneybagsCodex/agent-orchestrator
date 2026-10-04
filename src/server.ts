@@ -18,6 +18,7 @@
 import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
+import { buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -43,7 +44,7 @@ app.use((req, res, next) => {
   const origin = req.headers.origin ?? '';
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   }
@@ -102,6 +103,7 @@ const host = new OrchestratorHost({
   model: 'claude-haiku-4-5-20251001',
 });
 host.start();
+startInsights({ host, binDir: BIN_DIR, bridgeUrl: BRIDGE_URL });
 
 /** POST /chat {message, model} — hand a message to the persistent orchestrator. The reply arrives on /events. */
 app.post('/chat', (req, res) => {
@@ -130,38 +132,40 @@ app.get('/events', (req, res) => {
 });
 
 let statusCache: { at: number; body: unknown } | null = null;
-app.get('/status', (req, res) => {
-  // Several tabs poll this; the digest takes ~0.5s, so serve a result up to 2s old.
-  if (statusCache && Date.now() - statusCache.at < 2000) return res.json(statusCache.body);
-  execFile(path.join(BIN_DIR, 'orch-status'), ['--json'], { env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH}`, BRIDGE_URL }, timeout: 15000 },
-    (err, stdout) => {
-      if (err) return res.status(503).json({ error: `status unavailable: ${err.message}` });
-      try {
-        // Attach each agent's recent delegations (what the orchestrator asked it, and whether it has answered).
-        const all = readTasks();
-        const now = Date.now() / 1000;
-        const ledger = host.readMessages();
-        const agents = (JSON.parse(stdout) as Array<{ sid: string; peer?: string; name?: string }>).map((a) => ({
-          ...a,
-          messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
-          tasks: all.filter((t) => t.sid === a.sid).slice(-3).reverse()
-            .map((t) => ({ text: t.text.slice(0, 140), status: t.status, sentAt: t.sentAt })),
-        }));
-        const recent = all.filter((t) => now - t.sentAt < 3600);
-        const body = {
-          agents,
-          summary: {
-            total: recent.length,
-            waiting: recent.filter((t) => t.status === 'waiting').length,
-            replied: recent.filter((t) => t.status === 'seen' || t.status === 'reported').length,
-            stalled: recent.filter((t) => t.status === 'stalled' || t.status === 'lost').length,
-          },
-        };
-        statusCache = { at: Date.now(), body };
-        res.json(body);
-      } catch { res.status(500).json({ error: 'bad status output' }); }
-    });
+/** GET /status — the whole picture: agents with turn summaries, message states, the needs-you list, usage. */
+app.get('/status', async (_req, res) => {
+  try {
+    if (statusCache && Date.now() - statusCache.at < 2000) return res.json(statusCache.body);
+    const body = await buildStatus();
+    statusCache = { at: Date.now(), body };
+    res.json(body);
+  } catch (e) { res.status(503).json({ error: `status unavailable: ${(e as Error).message}` }); }
 });
+
+/** POST /decide {id, decision} — Approve/Deny an item from the needs-you list. */
+app.post('/decide', async (req, res) => {
+  const { id, decision } = req.body as { id?: string; decision?: 'approve' | 'deny' };
+  if (!id || (decision !== 'approve' && decision !== 'deny')) return res.status(400).json({ ok: false, message: 'id and decision are required' });
+  statusCache = null;
+  res.json(await decide(id, decision).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
+});
+
+/** POST /action {sid, action} — quick actions on an agent: compact, stop, retest. */
+app.post('/action', async (req, res) => {
+  const { sid, action } = req.body as { sid?: string; action?: 'compact' | 'stop' | 'retest' };
+  if (!sid || !['compact', 'stop', 'retest'].includes(action ?? '')) return res.status(400).json({ ok: false, message: 'sid and a valid action are required' });
+  statusCache = null;
+  res.json(await quickAction(sid, action!).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
+});
+
+/** Standing instructions the orchestrator keeps applying. */
+app.get('/standing', (_req, res) => res.json({ standing: readStanding() }));
+app.post('/standing', (req, res) => {
+  const text = String((req.body as any)?.text ?? '').trim();
+  if (!text) return res.status(400).json({ error: 'text is required' });
+  res.json({ standing: addStanding(text) });
+});
+app.delete('/standing/:id', (req, res) => { removeStanding(req.params.id); res.json({ ok: true }); });
 
 /**
  * GET /history — the orchestrator conversation rebuilt from its Claude transcript, so the UI can
@@ -181,7 +185,9 @@ app.get('/history', (_req, res) => {
       const c = e.message?.content;
       if (e.type === 'user') {
         const text = typeof c === 'string' ? c : (Array.isArray(c) ? c.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ') : '');
-        if (text.startsWith('<cross-session-message')) { const fn = text.match(/from-name=\"([^\"]*)\"/)?.[1] ?? 'an agent'; out.push({ role: 'system' as any, text: `Message from ${fn}` }); }
+        if (text.startsWith('[Cross-session')) out.push({ role: 'system' as any, text: 'Notice from the messaging system' });
+        else if (text.startsWith('[event]') || text.startsWith('[standing-instructions]')) out.push({ role: 'system' as any, text: text.startsWith('[event]') ? 'Orchestrator was told: ' + text.slice(8, 120) : 'Standing instructions updated' });
+        else if (text.startsWith('<cross-session-message')) { const fn = text.match(/from-name=\"([^\"]*)\"/)?.[1] ?? 'an agent'; out.push({ role: 'system' as any, text: `Message from ${fn}` }); }
         else if (text.startsWith('[auto-report]')) out.push({ role: 'system' as any, text: 'Update from an agent you delegated to' });
         else if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text });
       } else if (Array.isArray(c)) {

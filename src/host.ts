@@ -35,6 +35,7 @@ export type HostEvent =
   | { kind: 'turn'; state: 'start' | 'end' }
   | { kind: 'peer'; from: string; fromName: string; text: string }
   | { kind: 'notice'; state: MessageState | 'idle'; msgId?: string; text: string }
+  | { kind: 'notify'; level: 'info' | 'warn'; title: string; text: string; sid?: string }
   | { kind: 'error'; text: string };
 
 export type SeqEvent = HostEvent & { seq: number; at: number };
@@ -145,6 +146,18 @@ export class OrchestratorHost extends EventEmitter {
     this.push({ kind: 'user', text });
     if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' });
     this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n');
+  }
+
+  /** Tell the orchestrator's model something without it appearing as something the user typed. */
+  sendSystem(text: string) {
+    this.start();
+    if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' });
+    this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n');
+  }
+
+  /** A proactive update for the UI (no model involved). */
+  notify(n: { level: 'info' | 'warn'; title: string; text: string; sid?: string }) {
+    this.push({ kind: 'notify', ...n });
   }
 
   interrupt() {
