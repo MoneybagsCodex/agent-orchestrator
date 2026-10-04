@@ -103,3 +103,28 @@ orch-plan assign <agent-id> <plan|none>
 orch-overview                                   everything in one view (agents, plans, workers, unrouted agents)
 GET /plans   GET /plan?plan=   GET|POST /routing   GET|POST /workers   GET /overview
 ```
+
+## 5. Swarm safety rules (added 2026-10-04)
+
+A review of the subagent lifecycle found it trusted every caller completely. These rules are now enforced by `POST /workers` and `POST /plan/node`:
+
+| Gap found | Rule now |
+|---|---|
+| Any status could follow any other, so a late or duplicate report could reopen work already merged | Moves are checked. `done` and `cancelled` are final; `failed` may go back to `running` (retry); `review` may go back to `running` (rework). Anything else returns 409 with the allowed moves. |
+| Nothing limited how many subagents run at once | At most 5 unfinished workers (`ORCH_MAX_WORKERS` changes it). The 6th registration returns 429. |
+| A worker that stopped reporting looked "running" forever | Derived health: `running` with no update for 20 min (per-worker `staleMinutes`, 1-240) or `review` untouched for 60 min is flagged `stalled`, shown by `orch-overview`, and raises one warning notification. |
+| Re-posting the same status raised the notification again | Notifications fire only when the status actually changes. |
+| `workers.json` kept only the last 30 entries, which could drop a running worker its plan step still points at | Every unfinished worker is kept; only the 30 most recent finished ones are retained. |
+| A finished worker's git worktree could be left on disk | `worktreeLeft` is reported for finished workers whose worktree path still exists. |
+| A parent step could be marked done while its subagent steps were still open | `POST /plan/node` refuses `done` with unfinished sub-steps (409) unless `force:true`. |
+
+Health fields (`stalled`, `quietMinutes`, `worktreeLeft`) are computed on read and never stored, so they cannot go stale.
+
+### Not done (deliberately)
+- A stalled worker is only reported; nothing kills it. Subagents are launched by the lead's Agent tool, which the server cannot cancel from outside.
+- There is no automatic retry. A failed worker blocks its step and notifies; the lead decides.
+- The registry is still "report your own status". A subagent that never calls `/workers` is invisible, which is why the lead registers it at spawn time (section 3).
+
+## 6. Tool-error reporting
+
+A shell call that exits 1 after printing real output (a chained `grep`/`ls`/`diff` finding nothing in one step) is usually not a failure. Error lines now name the command and mark such cases as "likely a no-match ... not a real failure", and the summarizer is told not to list them as issues. This came from a real false report: a harmless exit 1 on a grep chain was summarized as a "notify function conflict" bug at `src/host.ts:166`; `notify()` itself was correct.

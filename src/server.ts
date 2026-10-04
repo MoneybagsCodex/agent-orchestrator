@@ -458,6 +458,10 @@ app.post('/plan/node', (req, res) => {
   const { plan: planId, id, status, note, sid } = req.body ?? {};
   const f = findNode(planId, String(id ?? '')); if (f.error) return res.status(404).json({ error: f.error });
   const { plan: p, node: n } = f;
+  if (status === 'done' && !req.body?.force) {
+    const open = p.nodes.filter((k: any) => k.parent === n.id && !['done'].includes(k.status));
+    if (open.length) return res.status(409).json({ error: `step ${n.id} still has unfinished sub-steps (${open.map((k: any) => k.id).join(', ')}). Finish or cancel them first, or pass force:true.` });
+  }
   if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
   if (sid !== undefined) n.sid = sid ? String(sid).slice(0, 40) : undefined;   // owner agent: session id prefix, empty clears
@@ -489,7 +493,7 @@ app.get('/overview', async (req, res) => {
   });
   const workerLabel = (id: string) => (readWorkers().find((w) => w.id === id)?.label ?? id) + ' (subagent)';
   res.json({
-    at: Math.floor(Date.now() / 1000), agents, usage: st.usage, workers: readWorkers().filter((w) => w.status === 'running' || Date.now() / 1000 - (w.endedAt ?? 0) < 3600),
+    at: Math.floor(Date.now() / 1000), agents, usage: st.usage, workers: readWorkers().filter((w) => !WORKER_TERMINAL.includes(w.status) || Date.now() / 1000 - (w.endedAt ?? 0) < 3600 || workerHealth(w).worktreeLeft).map((w) => workerHealth(w)),
     plans: plans.map((p) => ({ id: p.id, title: p.title, domain: p.domain ?? '', percent: p.nodes.length ? Math.round((p.nodes.filter((n: any) => n.status === 'done').length / p.nodes.length) * 100) : 0,
       unownedSteps: p.nodes.filter((n: any) => !ownerOf(n) && !n.worker).map((n: any) => n.id),
       steps: p.nodes.map((n: any) => ({ id: n.id, title: n.title, status: n.status, deps: n.deps, owner: ownerOf(n)?.topic ?? ownerOf(n)?.label ?? (n.worker ? workerLabel(n.worker) : null) })) })),
@@ -500,7 +504,36 @@ app.get('/overview', async (req, res) => {
 // this small registry is how the dashboard and the orchestrator can still see that they exist and what state they are in.
 const WORKERS_FILE = path.join(SESSIONS_DIR, 'workers.json');
 const readWorkers = (): any[] => { try { return JSON.parse(fs.readFileSync(WORKERS_FILE, 'utf-8')); } catch { return []; } };
-app.get('/workers', (_req, res) => res.json({ workers: readWorkers() }));
+const WORKER_TERMINAL = ['done', 'failed', 'cancelled'];
+// Allowed status moves. A finished worker stays finished (a failed one may be retried); this stops a late or duplicate report from
+// silently reopening work the lead already reviewed and merged.
+const WORKER_NEXT: Record<string, string[]> = {
+  running: ['running', 'review', 'done', 'failed', 'cancelled'], review: ['review', 'running', 'done', 'failed', 'cancelled'],
+  failed: ['failed', 'running', 'cancelled'], done: ['done'], cancelled: ['cancelled'],
+};
+const MAX_ACTIVE_WORKERS = Number(process.env.ORCH_MAX_WORKERS) > 0 ? Number(process.env.ORCH_MAX_WORKERS) : 5;
+const STALE_RUNNING_S = 20 * 60, STALE_REVIEW_S = 60 * 60;
+/** Derived health, never stored: a running worker that has not reported for 20 minutes, a review nobody picked up for an hour, a finished worker whose worktree is still on disk. */
+function workerHealth(w: any, nowS = Math.floor(Date.now() / 1000)) {
+  const quiet = nowS - (w.updatedAt ?? w.startedAt ?? nowS); const limit = (Number(w.staleMinutes) > 0 ? Number(w.staleMinutes) * 60 : STALE_RUNNING_S);
+  const stalled = (w.status === 'running' && quiet > limit) || (w.status === 'review' && quiet > STALE_REVIEW_S);
+  const worktreeLeft = WORKER_TERMINAL.includes(w.status) && !!w.worktree && fs.existsSync(String(w.worktree));
+  return { ...w, quietMinutes: Math.round(quiet / 60), stalled, worktreeLeft };
+}
+/** Keep every unfinished worker, and only the 30 most recent finished ones (a plain slice(-30) could drop a running worker its plan step still points at). */
+function pruneWorkers(list: any[]) {
+  const finished = list.filter((x) => WORKER_TERMINAL.includes(x.status)); const drop = new Set(finished.slice(0, Math.max(0, finished.length - 30)));
+  return list.filter((x) => !drop.has(x));
+}
+// A worker that goes quiet is the failure nobody sees: warn once when it does.
+const notifiedStale = new Set<string>();
+setInterval(() => {
+  for (const w of readWorkers()) {
+    const h = workerHealth(w); const key = `${w.id}:${w.status}`;
+    if (h.stalled && !notifiedStale.has(key)) { notifiedStale.add(key); host.notify({ level: 'warn', title: `${w.label || w.id} may be stuck`, text: `Subagent has been ${w.status} with no update for ${h.quietMinutes} minutes.` }); }
+  }
+}, 60_000).unref();
+app.get('/workers', (_req, res) => res.json({ workers: readWorkers().map((w) => workerHealth(w)) }));
 app.post('/workers', (req, res) => {
   const b = req.body ?? {}; const id = String(b.id ?? '').slice(0, 40);
   if (!id) return res.status(400).json({ error: 'id required' });
@@ -508,9 +541,17 @@ app.post('/workers', (req, res) => {
   if (b.status !== undefined && !STATUSES.includes(b.status)) return res.status(400).json({ error: `status must be one of ${STATUSES.join(', ')}` });
   const list = readWorkers(); const nowS = Math.floor(Date.now() / 1000);
   let w = list.find((x) => x.id === id);
+  if (!w && list.filter((x) => !WORKER_TERMINAL.includes(x.status)).length >= MAX_ACTIVE_WORKERS) {
+    return res.status(429).json({ error: `${MAX_ACTIVE_WORKERS} subagents are already active; finish, cancel or review one first (set ORCH_MAX_WORKERS to change the limit)` });
+  }
+  if (w && b.status !== undefined && !WORKER_NEXT[w.status]?.includes(b.status)) {
+    return res.status(409).json({ error: `worker "${id}" is ${w.status}; it cannot move to ${b.status} (allowed: ${(WORKER_NEXT[w.status] ?? []).join(', ')})` });
+  }
+  const prevStatus = w?.status;
   if (!w) { w = { id, startedAt: nowS, status: 'running' }; list.push(w); }
+  if (b.staleMinutes !== undefined) w.staleMinutes = Math.max(1, Math.min(240, Number(b.staleMinutes) || 20));
   for (const k of ['label', 'kind', 'branch', 'worktree', 'note'] as const) if (b[k] !== undefined) w[k] = String(b[k]).slice(0, 300);
-  if (b.status !== undefined) { w.status = b.status; if (b.status !== 'running') w.endedAt = nowS; }
+  if (b.status !== undefined) { w.status = b.status; if (WORKER_TERMINAL.includes(b.status)) w.endedAt = nowS; else delete w.endedAt; }
   w.updatedAt = nowS;
   // Pattern: every delegated worker that matters has a plan step; its status drives the step so the roadmap never disagrees with it.
   const STEP_OF: Record<string, string> = { running: 'active', review: 'active', done: 'done', failed: 'blocked', cancelled: 'todo' };
@@ -528,8 +569,8 @@ app.post('/workers', (req, res) => {
     node.status = STEP_OF[w.status]; node.statusAt = nowS; if (node.status === 'done') node.doneAt = nowS;
   }
   if (node) { node.note = w.status === 'review' ? 'awaiting lead review' : w.status === 'failed' ? (w.note || 'worker failed') : node.note; plan.updatedAt = nowS; writePlan(plan); }
-  if (b.status !== undefined && ['review', 'done', 'failed'].includes(b.status)) host.notify({ level: b.status === 'failed' ? 'warn' : 'info', title: `${w.label || id}: ${b.status}`, text: w.note || '' });
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(WORKERS_FILE, JSON.stringify(list.slice(-30), null, 2));
+  if (b.status !== undefined && b.status !== prevStatus && ['review', 'done', 'failed'].includes(b.status)) host.notify({ level: b.status === 'failed' ? 'warn' : 'info', title: `${w.label || id}: ${b.status}`, text: w.note || '' });
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true }); fs.writeFileSync(WORKERS_FILE, JSON.stringify(pruneWorkers(list), null, 2));
   res.json({ ok: true, worker: w });
 });
 app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));

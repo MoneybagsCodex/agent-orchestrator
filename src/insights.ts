@@ -51,6 +51,18 @@ function textOf(content: any): string {
   return '';
 }
 
+/** One line for a failed tool call. A shell "Exit code 1" whose output is real content (grep/ls/diff finding nothing in one step of a chain) is flagged
+ *  as probably not a failure, so a summary does not turn matched lines into an invented bug. */
+export function describeToolError(raw: string): string {
+  const t = raw.replace(/<\/?tool_use_error>/g, '').replace(/\s+/g, ' ').trim();
+  const m = t.match(/^Exit code (\d+)\s*(.*)$/);
+  if (!m) return t.slice(0, 160);
+  const out = m[2];
+  if (m[1] === '1' && out.length > 0) return `exit code 1 but it printed output (${out.slice(0, 110)}); likely a no-match from a chained grep/ls/diff, not a real failure`;
+  if (m[1] === '1') return 'exit code 1 with no output (a no-match from grep/test/diff, not necessarily a failure)';
+  return `exit code ${m[1]}${out ? `: ${out.slice(0, 130)}` : ''}`;
+}
+
 export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; doing: string; activity: Activity | null } {
   const st = fs.statSync(file);
   const key = `${st.mtimeMs}-${st.size}-${busy}`;
@@ -89,7 +101,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
         for (const b of c) if (b.type === 'tool_result' && b.is_error && cur) {
           cur.errors++;
           const raw = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '');
-          if ((cur.errorDetails ??= []).length < 3) cur.errorDetails.push(`${toolNames.get(b.tool_use_id) ?? 'tool'}: ${raw.replace(/<\/?tool_use_error>/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+          if ((cur.errorDetails ??= []).length < 3) cur.errorDetails.push(`${toolNames.get(b.tool_use_id) ?? 'tool'}: ${describeToolError(raw)}`);
         }
         continue;
       }
@@ -115,7 +127,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
         }
         else if (b.type === 'tool_use') {
           cur.tools[b.name] = (cur.tools[b.name] ?? 0) + 1;
-          if (b.id) toolNames.set(b.id, b.name);
+          if (b.id) toolNames.set(b.id, b.name === 'Bash' && b.input?.command ? `Bash \`${String(b.input.command).replace(/\s+/g, ' ').slice(0, 70)}\`` : b.name);
           lastTool = `${b.name} ${b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.to ?? ''}`.trim().slice(0, 100);
           const fp = b.input?.file_path;
           if (fp && /^(Edit|Write|NotebookEdit|MultiEdit)$/.test(b.name)) { const f = path.basename(fp); if (!cur.files.includes(f)) cur.files.push(f); }
@@ -181,7 +193,7 @@ function standFor(sid: string, turns: TurnSummary[]): Stand | null {
   if (hit) { try { const j = JSON.parse(hit); return { decisions: j.decisions ?? [], issues: j.issues ?? [], done: j.done ?? [] }; } catch { return null; } }
   queueSummary(key, `You are summarizing where a coding agent's work stands, for a person who supervises several agents. Below are its recent exchanges, oldest first. Reply with ONLY a JSON object, no other text, in exactly this shape: {"decisions":[],"issues":[],"done":[]}
 - decisions: things still waiting on the person to decide or answer, including choices the agent put to them. Max 3, each at most 14 words. Only if still unresolved after the last exchange.
-- issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words. If you mention a tool error, name the tool and say what the error said; never write a vague tool-error line. Skip an error that later exchanges show was worked around or fixed.
+- issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words. If you mention a tool error, name the tool and say what the error said; never write a vague tool-error line. An error line marked "likely a no-match ... not a real failure" is not a bug: do not list it as an issue. Skip an error that later exchanges show was worked around or fixed.
 - done: concrete things already completed in this body of work, past tense. Max 5, each at most 12 words.
 Use only what the text says; never guess or add anything. Anything that was fixed or decided in a later exchange must not appear as pending. If a list has nothing, use [].
 
