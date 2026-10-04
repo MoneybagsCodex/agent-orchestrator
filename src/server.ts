@@ -233,11 +233,18 @@ app.post('/chat', (req, res) => {
 });
 
 /** GET /status — the per-agent digest (same data the orchestrator reads via orch-status). */
+let statusCache: { at: number; body: unknown } | null = null;
 app.get('/status', (req, res) => {
+  // Several tabs poll this; the digest takes ~0.5s, so serve a result up to 2s old.
+  if (statusCache && Date.now() - statusCache.at < 2000) return res.json(statusCache.body);
   execFile(path.join(BIN_DIR, 'orch-status'), ['--json'], { env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH}`, BRIDGE_URL }, timeout: 15000 },
     (err, stdout) => {
       if (err) return res.status(503).json({ error: `status unavailable: ${err.message}` });
-      try { res.json({ agents: JSON.parse(stdout) }); } catch { res.status(500).json({ error: 'bad status output' }); }
+      try {
+        const body = { agents: JSON.parse(stdout) };
+        statusCache = { at: Date.now(), body };
+        res.json(body);
+      } catch { res.status(500).json({ error: 'bad status output' }); }
     });
 });
 
