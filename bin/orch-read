@@ -23,6 +23,18 @@ fi
 
 if [[ -n "$tr" ]]; then
   age=$(orch_age "$tr")
+  # If this read delivers a finished reply to a task we are tracking, mark it seen so the server does not
+  # also send an automatic report for it.
+  tasks="$STATE/orchestrator-sessions/tasks.json"
+  if [[ -f "$tasks" && "$status" != busy* && "$status" != waiting* ]]; then
+    while IFS='|' read -r tid base; do
+      [[ -z "$tid" ]] && continue
+      # Only a real assistant reply written after the message was sent counts as "delivered to the orchestrator".
+      if tail -n +$((base+1)) "$tr" | jq -e 'select(.type == "assistant") | .message.content[]? | select(.type == "text" and (.text | length > 0))' >/dev/null 2>&1; then
+        tmp=$(mktemp); jq --arg id "$tid" 'map(if .id == $id then .status = "seen" else . end)' "$tasks" > "$tmp" && mv "$tmp" "$tasks"
+      fi
+    done < <(jq -r --arg sid "$sid" '.[] | select(.sid == $sid and .status == "waiting") | "\(.id)|\(.baseline)"' "$tasks")
+  fi
   echo "== $(orch_who "$s") — agent reports: ${status:-unknown}; last transcript write ${age}s ago =="
   jq -r '
     def txt: .message.content | if type == "string" then . else map(

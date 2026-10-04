@@ -26,6 +26,7 @@ fi
 s=$(orch_resolve "$TARGET") || exit 1
 sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s"); topic=$(jq -r .topic <<<"$s")
 who=$(orch_who "$s")
+pid0=$(jq -r .pid <<<"$s"); tr0=$(orch_transcript "$sid" "$pid0"); base0=0; [[ -n "$tr0" ]] && base0=$(wc -l < "$tr0" | tr -d ' ')
 
 # Slash commands change an agent's state (/compact, /clear, /goal, /exit ...) and can't be undone, and the
 # panel label can disagree with what the terminal is really running. Refuse unless the user has confirmed
@@ -68,6 +69,15 @@ else
   RESP=$(post "$TEXT" false)
 fi
 ok "$RESP" || { echo "FAILED: $RESP" >&2; exit 1; }
+
+# Remember the delegation so the orchestrator server can report the agent's answer back on its own,
+# even if the user has moved the conversation elsewhere by the time the agent replies.
+if [[ "$SUBMIT" == "true" && "$TEXT" != /* ]]; then
+  tasks="$STATE/orchestrator-sessions/tasks.json"; mkdir -p "$(dirname "$tasks")"; [[ -f "$tasks" ]] || echo '[]' > "$tasks"
+  tmp=$(mktemp); jq --arg id "$(uuidgen)" --arg sid "$sid" --argjson pid "$pid0" --arg title "$topic" --arg text "${TEXT:0:300}" \
+    --arg tr "$tr0" --argjson base "$base0" --argjson at "$(date +%s)" \
+    '. + [{id:$id, sid:$sid, pid:$pid, title:$title, text:$text, transcript:$tr, baseline:$base, sentAt:$at, status:"waiting"}]' "$tasks" > "$tmp" && mv "$tmp" "$tasks"
+fi
 
 # Confirm delivery: for typed text, look for it appearing as a user message in the agent's transcript.
 if [[ "$SUBMIT" == "true" ]]; then

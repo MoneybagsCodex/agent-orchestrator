@@ -263,7 +263,8 @@ app.get('/history', (_req, res) => {
       const c = e.message?.content;
       if (e.type === 'user') {
         const text = typeof c === 'string' ? c : (Array.isArray(c) ? c.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ') : '');
-        if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text });
+        if (text.startsWith('[auto-report]')) out.push({ role: 'system' as any, text: 'Update from an agent you delegated to' });
+        else if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text });
       } else if (Array.isArray(c)) {
         let cur = out[out.length - 1];
         if (!cur || cur.role !== 'assistant') { cur = { role: 'assistant', text: '', steps: [] }; out.push(cur); }
@@ -278,6 +279,103 @@ app.get('/history', (_req, res) => {
     res.status(500).json({ error: (e as Error).message });
   }
 });
+
+/**
+ * Follow-through on delegations. orch-send records each message it sends to an agent in tasks.json.
+ * If the user has moved on (or the orchestrator's own wait ran out) by the time the agent answers, nobody
+ * would report the answer, so this watcher notices the reply and asks the orchestrator to report it.
+ * orch-read marks a task "seen" when it already delivered the reply in-turn, which prevents a duplicate.
+ */
+type Task = {
+  id: string; sid: string; pid: number; title: string; text: string; transcript: string;
+  baseline: number; sentAt: number; status: 'waiting' | 'seen' | 'reported' | 'lost' | 'stalled'; blockedNotified?: boolean;
+};
+const TASKS_FILE = path.join(SESSIONS_DIR, 'tasks.json');
+const STALL_SECONDS = 20 * 60;
+
+function readTasks(): Task[] {
+  try { return JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8')); } catch { return []; }
+}
+
+async function sendAutoReport(message: string) {
+  // Goes through the normal /chat queue, so it waits for any turn in progress and shows up in the history.
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, model: 'claude-haiku-4-5-20251001' }),
+    });
+    await r.text(); // drain until the turn finishes
+  } catch (e) { console.error('[watcher] auto-report failed:', (e as Error).message); }
+}
+
+let watching = false;
+async function checkTasks() {
+  // While the orchestrator is mid-turn it is probably handling the reply itself; wait until it is free. Anything
+  // it did not deliver is still 'waiting' afterwards and gets reported then.
+  if (watching || turnBusy || waiting.length) return;
+  watching = true;
+  try {
+    const tasks = readTasks();
+    let changed = false;
+    // Merge by id so a task orch-send appends while we work is never lost.
+    const persist = () => fs.writeFileSync(TASKS_FILE, JSON.stringify(readTasks().map((x) => tasks.find((y) => y.id === x.id) ?? x), null, 2));
+    for (const t of tasks) {
+      if (t.status !== 'waiting') continue;
+      // orch-read may have marked it 'seen' since we loaded the file: trust the file, not our copy.
+      const current = readTasks().find((x) => x.id === t.id);
+      if (!current || current.status !== 'waiting') { if (current) t.status = current.status; continue; }
+      let agentStatus = '';
+      try { agentStatus = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'sessions', `${t.pid}.json`), 'utf-8')).status ?? ''; } catch { /* process gone */ }
+      // A brand-new agent has no transcript until its first message, so find it via the process's real session id.
+      if (!t.transcript) {
+        try {
+          const real = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'sessions', `${t.pid}.json`), 'utf-8')).sessionId;
+          const projects = path.join(os.homedir(), '.claude', 'projects');
+          const dir = fs.readdirSync(projects).find((d) => fs.existsSync(path.join(projects, d, `${real}.jsonl`)));
+          if (dir) { t.transcript = path.join(projects, dir, `${real}.jsonl`); changed = true; }
+        } catch { /* not there yet */ }
+        if (!t.transcript) { if (Date.now() / 1000 - t.sentAt > STALL_SECONDS) { t.status = 'lost'; changed = true; } continue; }
+      }
+      let ageSec: number;
+      try { ageSec = (Date.now() - fs.statSync(t.transcript).mtimeMs) / 1000; } catch { t.status = 'lost'; changed = true; continue; }
+
+      const replies: string[] = [];
+      for (const line of fs.readFileSync(t.transcript, 'utf-8').split('\n').slice(t.baseline)) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          if (e.type !== 'assistant' || e.isSidechain) continue;
+          for (const b of e.message?.content ?? []) if (b.type === 'text' && b.text?.trim()) replies.push(b.text.trim());
+        } catch { /* partial line */ }
+      }
+
+      const who = `"${t.title || 'untitled'}" [${t.sid.slice(0, 8)}]`;
+      const ctx = `You earlier sent ${who} this message: "${t.text.slice(0, 200)}".`;
+      const tail = 'Do not send anything to any agent now. Tell the user in plain words, briefly. Always name the agent by title and id.';
+
+      if (agentStatus === 'waiting' && !t.blockedNotified) {
+        t.blockedNotified = true; changed = true;
+        persist();
+        await sendAutoReport(`[auto-report] ${ctx} It is now blocked and waiting on a decision (a permission prompt). Use orch-read on it to see what it is asking. ${tail}`);
+      } else if (replies.length && agentStatus !== 'busy' && agentStatus !== 'waiting' && ageSec >= 6) {
+        t.status = 'reported'; changed = true;
+        persist();
+        await sendAutoReport(`[auto-report] ${ctx} It has finished and replied:\n\n${replies.slice(-3).join('\n\n').slice(0, 2500)}\n\n${tail}`);
+      } else if (Date.now() / 1000 - t.sentAt > STALL_SECONDS) {
+        t.status = 'stalled'; changed = true;
+        persist();
+        await sendAutoReport(`[auto-report] ${ctx} It has not replied after ${Math.round(STALL_SECONDS / 60)} minutes (agent status: ${agentStatus || 'unknown'}). Use orch-status/orch-read to see why. ${tail}`);
+      }
+    }
+    if (changed) persist();
+  } catch (e) {
+    console.error('[watcher]', (e as Error).message);
+  } finally { watching = false; }
+}
+setInterval(checkTasks, 4000);
+
+/** GET /tasks — delegations the orchestrator is tracking (for the UI). */
+app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));
 
 /** POST /stop — cancel the turn that is currently running (queued messages still run afterwards). */
 app.post('/stop', (req, res) => {
