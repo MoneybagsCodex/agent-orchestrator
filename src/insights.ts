@@ -23,6 +23,7 @@ export interface TurnSummary {
   asked: string; said: string; tools: Record<string, number>; files: string[];
   commands: number; errors: number; startedAt: number; endedAt: number; inProgress: boolean;
   loop?: { count: number; goal: string };
+  question?: string;   // the question the agent's final message ends by asking the user, if any
 }
 
 export function transcriptFor(pid: number, sid: string): string | null {
@@ -88,7 +89,14 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
     } else if (cur && Array.isArray(c)) {
       cur.endedAt = ts || cur.endedAt;
       for (const b of c) {
-        if (b.type === 'text' && b.text?.trim()) cur.said = b.text.replace(/\s+/g, ' ').trim().slice(0, 240);
+        if (b.type === 'text' && b.text?.trim()) {
+          cur.said = b.text.replace(/\s+/g, ' ').trim().slice(0, 240);
+          // Does the message end by asking the user something? Take the last sentence that is a question.
+          const tail = b.text.replace(/\s+/g, ' ').trim().slice(-500);
+          const sentences = tail.split(/(?<=[.!?])\s+/);
+          const lastQ = [...sentences].reverse().find((x) => x.trim().endsWith('?'));
+          cur.question = lastQ && sentences.indexOf(lastQ) >= sentences.length - 2 ? lastQ.trim().slice(0, 160) : undefined;
+        }
         else if (b.type === 'tool_use') {
           cur.tools[b.name] = (cur.tools[b.name] ?? 0) + 1;
           lastTool = `${b.name} ${b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.to ?? ''}`.trim().slice(0, 100);
@@ -121,17 +129,31 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
 // ---------------------------------------------------------------- "Working on" headlines (model-written, cached)
 const HEADLINES_FILE = path.join(ORCH_DIR, 'headlines.json');
 const headlines: Record<string, string> = readJson<Record<string, string>>(HEADLINES_FILE, {});
-const headlineQueue: Array<{ key: string; asked: string[]; said: string }> = [];
+const headlineQueue: Array<{ key: string; prompt: string }> = [];
 const headlineQueued = new Set<string>();
 let headlineBusy = false;
 
 /** What the user is asking this agent to accomplish, in one short line. Cached; computed in the background. */
 function headlineFor(sid: string, asked: string[], said: string): string | null {
   if (!asked.length) return null;
-  const key = `${sid}|${createHash('sha1').update(asked.join('\n')).digest('hex').slice(0, 12)}`;
+  const key = `${sid}|goal|${createHash('sha1').update(asked.join('\n')).digest('hex').slice(0, 12)}`;
   if (headlines[key]) return headlines[key];
-  if (!headlineQueued.has(key)) { headlineQueued.add(key); headlineQueue.push({ key, asked, said }); void runHeadlines(); }
+  queueSummary(key, `Below are the most recent requests a person made to a coding agent, oldest first. In ONE short line (at most 14 words) say what the agent is working toward right now, as a goal that starts with a verb like "Adding", "Fixing", "Designing", "Deciding". Weight the most recent request most, and use earlier ones only to understand what it refers to. Do not quote them. Output only that line, nothing else.\n\n${asked.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n')}`);
   return null;
+}
+
+/** What the agent says it just accomplished, in one short past-tense line, from its own final message. */
+function outcomeFor(sid: string, asked: string, said: string, files: string[]): string | null {
+  if (!said) return null;
+  const key = `${sid}|done|${createHash('sha1').update(asked + '\n' + said).digest('hex').slice(0, 12)}`;
+  if (headlines[key]) return headlines[key];
+  queueSummary(key, `A coding agent was asked: "${asked.slice(0, 300)}"\nIts final message was: "${said.slice(0, 600)}"${files.length ? `\nFiles it edited: ${files.join(', ')}` : ''}\n\nIn ONE short line (at most 16 words), in the past tense, say what it accomplished or concluded, using only what its final message says. If it did not actually finish or only asked a question, say what it is waiting for. Output only that line, nothing else.`);
+  return null;
+}
+
+function queueSummary(key: string, prompt: string) {
+  if (headlineQueued.has(key)) return;
+  headlineQueued.add(key); headlineQueue.push({ key, prompt }); void runHeadlines();
 }
 
 async function runHeadlines() {
@@ -139,7 +161,7 @@ async function runHeadlines() {
   headlineBusy = true;
   while (headlineQueue.length) {
     const job = headlineQueue.shift()!;
-    const prompt = `Below are the most recent requests a person made to a coding agent, oldest first. In ONE short line (at most 14 words) say what the agent is working toward right now, as a goal that starts with a verb like "Adding", "Fixing", "Designing", "Deciding". Weight the most recent request most, and use earlier ones only to understand what it refers to. Do not quote them. Output only that line, nothing else.\n\n${job.asked.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n')}`;
+    const prompt = job.prompt;
     try {
       const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
       for (const k of Object.keys(cleanEnv)) if (k.startsWith('CLAUDE_CODE_')) delete cleanEnv[k];
@@ -197,8 +219,10 @@ export async function buildStatus() {
     if (tr) { try { ({ turns, doing } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
     const recentAsks = turns.filter((t) => !t.loop && t.asked).slice(-3).map((t) => t.asked);
     const headline = headlineFor(a.sid, recentAsks, turns.at(-1)?.said ?? '');
+    const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
+    const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, headline,
+      ...a, turns, doing, headline, outcome, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt })),
     };
