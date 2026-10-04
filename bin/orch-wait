@@ -7,11 +7,11 @@ source "$(dirname "$0")/_lib.sh"
 TARGET="${1:?Usage: orch-wait <label|sid-prefix> [max-seconds]}"
 MAX="${2:-90}"
 s=$(orch_resolve "$TARGET") || exit 1
-sid=$(jq -r .sid <<<"$s")
+sid=$(jq -r .sid <<<"$s"); pid=$(jq -r .pid <<<"$s")
 
 # Fingerprint of "what the agent has produced": transcript size if there is one, else the cleaned screen text.
 snap() {
-  local tr; tr=$(orch_transcript "$sid")
+  local tr; tr=$(orch_transcript "$sid" "$pid")
   if [[ -n "$tr" ]]; then stat -f %z "$tr"
   else orch_sessions 600 | jq -r --arg sid "$sid" '.[] | select(.sid == $sid) | .bufferTail' | orch_strip_ansi \
         | grep -v -E '(thinking|esc to interrupt|\([0-9]+s ·)' | tr -d '✻✽✶✳✢· ' | md5; fi

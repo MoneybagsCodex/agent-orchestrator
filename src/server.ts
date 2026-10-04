@@ -16,7 +16,7 @@
  */
 
 import express from 'express';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -43,6 +43,7 @@ app.use((req, res, next) => {
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -69,7 +70,8 @@ const BIN_DIR = path.resolve(import.meta.dirname, '../bin');
 const ORCHESTRATOR_ROLE = `You are the user's master orchestrator. The user talks to you in plain language (voice or text); you coordinate their live agent terminals (Claude Code sessions) on their behalf, and report back in plain, concise language.
 
 You can ONLY act through these commands (run them with Bash, exactly as written):
-- orch-list                          list live terminals: label, short id, uptime, last visible line
+- orch-status                        START HERE for "what's going on / what is X doing". One digest per agent: state (WORKING / IDLE / BLOCKED on a decision), what it last said, what it was last asked, and notes (e.g. a /goal loop makes idle/busy flicker; that is normal for that agent, not a fault). Report these in plain words; never dump raw output at the user.
+- orch-list                          quick list of live terminals: label, short id, uptime
 - orch-read <label|id> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
 - orch-send <label|id> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction)
 - orch-send <label|id> --key <k>     press a key (enter esc up down y n tab ctrl-c), e.g. to answer a permission or trust prompt
@@ -81,8 +83,13 @@ How to work:
 3. Many questions need no terminal at all (planning, clarifying, deciding what to ask which agent). Answer those directly and conversationally; keep earlier turns in mind.
 4. Before sending anything destructive or hard to undo (deploys, deletes, force-push, spending money, messaging people), state exactly what you will send and to whom, and wait for the user to say yes.
 5. Permission prompts: if orch-list/orch-read shows a terminal waiting on a prompt (permission question, "Esc to cancel", "Enter to confirm"), NEVER type text into it; orch-send will refuse anyway. Tell the user exactly what it is asking and wait for their decision, then answer with orch-send --key. A pending prompt also means that agent is blocked, so say so when summarising. Don't send instructions to a blocked agent until the prompt is resolved.
-6. Keep replies short: what you did, what came back, what you suggest next.
+6. Keep replies short: what you did, what came back, what you suggest next. Always say which agent (by its label) you mean, and for every message you send say whether orch-send confirmed delivery ("delivered", "queued behind its current work", or "not confirmed"); never imply an agent got something unless orch-send says so.
+7. The user may send follow-up messages while you are waiting on an agent. Treat each as new context for the same task, and adjust what you are doing rather than starting over.
 `;
+
+let turnBusy = false;
+let currentKill: (() => void) | null = null;
+const waiting: Array<() => void> = [];
 
 /**
  * POST /chat {message, model}
@@ -106,6 +113,11 @@ app.post('/chat', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
+  // One conversation = one Claude session, so only one turn can run at a time. Messages sent while a
+  // turn is running wait in a queue (the browser sees {queued:n}) and run next, in order.
+  let kill: () => void = () => {};
+  const start = () => {
+  turnBusy = true;
   // Spawn the Claude CLI process with --resume to maintain session
   const started = fs.existsSync(STARTED_FILE);
   const claudeArgs = [
@@ -114,8 +126,16 @@ app.post('/chat', (req, res) => {
     '--output-format', 'stream-json',
     ...(started ? ['--resume', orchestratorSid] : ['--session-id', orchestratorSid]),
     '--model', selectedModel,
-    // Only the three helper scripts; the orchestrator can't touch files or run anything else.
-    '--allowedTools', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
+    // Lock the orchestrator down: Bash is its only tool, only the orch-* helpers (plus harmless text
+    // filters) may run, and everything else is denied outright. User-level settings are ignored because
+    // their broad allow rules would otherwise widen this; no MCP servers, no skills.
+    '--tools', 'Bash',
+    '--permission-mode', 'dontAsk',
+    '--setting-sources', 'project',
+    '--strict-mcp-config',
+    '--disable-slash-commands',
+    '--allowedTools', 'Bash(orch-status:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
+    'Bash(sleep:*)', 'Bash(cut:*)', 'Bash(tail:*)', 'Bash(head:*)', 'Bash(grep:*)',
     '--append-system-prompt', ORCHESTRATOR_ROLE,
     '--', message
   ];
@@ -128,6 +148,9 @@ app.post('/chat', (req, res) => {
     env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH}`, BRIDGE_URL },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  kill = () => { if (proc.exitCode === null) proc.kill(); };
+  currentKill = kill;
 
   let buffer = '';
   let isFirstChunk = true;
@@ -168,8 +191,9 @@ app.post('/chat', (req, res) => {
     console.error(`[Claude stderr] ${chunk.toString('utf-8')}`);
   });
 
-  proc.on('close', (code) => {
+  proc.on('close', (code, signal) => {
     if (code === 0) fs.writeFileSync(STARTED_FILE, '1', 'utf-8');
+    else if (signal) res.write(`data: ${JSON.stringify({ text: '(stopped)' })}\n\n`);
     else if (isFirstChunk) res.write(`data: ${JSON.stringify({ text: `❌ claude exited with code ${code}` })}\n\n`);
     if (!isFirstChunk) {
       res.write('event: end\n');
@@ -177,21 +201,51 @@ app.post('/chat', (req, res) => {
     }
     res.end();
     console.log(`[${new Date().toISOString()}] Orchestrator: closed with code ${code}`);
+    turnBusy = false;
+    currentKill = null;
+    waiting.shift()?.();
   });
 
   proc.on('error', (err) => {
     console.error(`[Claude spawn error] ${err.message}`);
-    if (!isFirstChunk) {
-      res.write(`data: ${JSON.stringify({ text: `❌ Error: ${err.message}` })}\n\n`);
-    }
+    res.write(`data: ${JSON.stringify({ text: `❌ Error: ${err.message}` })}\n\n`);
     res.end();
+    turnBusy = false;
+    currentKill = null;
+    waiting.shift()?.();
+  });
+  };
+
+  // If the browser goes away, stop this turn (or drop it from the queue). (req 'close' fires as soon
+  // as the body is read, so it must be the response that we watch.)
+  res.on('close', () => {
+    kill();
+    const i = waiting.indexOf(start);
+    if (i >= 0) waiting.splice(i, 1);
   });
 
-  // Kill claude only if the browser goes away mid-stream. (req 'close' fires as soon as
-  // the body is read, so it must be the response that we watch.)
-  res.on('close', () => {
-    if (proc.exitCode === null) proc.kill();
-  });
+  if (turnBusy) {
+    waiting.push(start);
+    res.write(`data: ${JSON.stringify({ queued: waiting.length })}\n\n`);
+  } else {
+    start();
+  }
+});
+
+/** GET /status — the per-agent digest (same data the orchestrator reads via orch-status). */
+app.get('/status', (req, res) => {
+  execFile(path.join(BIN_DIR, 'orch-status'), ['--json'], { env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH}`, BRIDGE_URL }, timeout: 15000 },
+    (err, stdout) => {
+      if (err) return res.status(503).json({ error: `status unavailable: ${err.message}` });
+      try { res.json({ agents: JSON.parse(stdout) }); } catch { res.status(500).json({ error: 'bad status output' }); }
+    });
+});
+
+/** POST /stop — cancel the turn that is currently running (queued messages still run afterwards). */
+app.post('/stop', (req, res) => {
+  const wasRunning = turnBusy;
+  currentKill?.();
+  res.json({ stopped: wasRunning });
 });
 
 /**

@@ -37,7 +37,23 @@ orch_resolve() {
   esac
 }
 
-orch_transcript() { ls "$HOME"/.claude/projects/*/"$1".jsonl 2>/dev/null | head -1; }
+# Transcript for a live terminal. The cockpit's sid is not always Claude's real session id (it changes
+# on /clear, resume, etc.), so ask the process's own registry (~/.claude/sessions/<pid>.json) first.
+# Usage: orch_transcript <sid> [pid]
+orch_transcript() {
+  local sid="$1" pid="$2" real="" f
+  [[ -n "$pid" && -f "$HOME/.claude/sessions/$pid.json" ]] && real=$(jq -r '.sessionId // empty' "$HOME/.claude/sessions/$pid.json")
+  for id in $real $sid; do
+    f=$(ls "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)
+    [[ -n "$f" ]] && { echo "$f"; return; }
+  done
+}
+
+# Live status as reported by the agent process itself, e.g. "idle", "busy", "waiting: permission prompt".
+orch_status() {
+  [[ -f "$HOME/.claude/sessions/$1.json" ]] &&
+    jq -r '(.status // empty) + (if .waitingFor then ": " + .waitingFor else "" end)' "$HOME/.claude/sessions/$1.json"
+}
 
 orch_strip_ansi() { perl -CS -pe 's/\e\[\d*[CG]/ /g; s/\e\[[0-9;?>]*[ -\/]*[@-~]//g; s/\e\][^\a]*\a//g; s/\r//g' | cat -s; }
 

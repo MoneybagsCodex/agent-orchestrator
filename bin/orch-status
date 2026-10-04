@@ -1,0 +1,52 @@
+#!/bin/bash
+# One clear digest per live agent. Usage: orch-status [--json]
+# state: WORKING | IDLE | BLOCKED (waiting on a decision from the user) | UNKNOWN
+# doing: the last thing the agent said; asked: the last thing it was asked; ago: seconds since its transcript changed.
+
+source "$(dirname "$0")/_lib.sh"
+
+HOOK_RE='(^|\n)\[[^\]]{8,}\]:'   # a /goal Stop-hook feedback message: "[<goal condition>]: ..."
+
+text_of() { # JSONL on stdin, $1 = type, $2 = optional regex of messages to skip: last non-empty text of that kind
+  jq -r --arg ty "$1" --arg skip "${2:-}" 'select(.type == $ty and (.isSidechain | not))
+    | .message.content | (if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end)
+    | select(length > 0 and (startswith("<") | not) and ($skip == "" or (test($skip) | not)))' | tail -1 | tr '\n' ' ' | tr -s ' ' | cut -c1-240
+}
+
+out='[]'
+while read -r s; do
+  [[ -z "$s" ]] && continue
+  sid=$(jq -r .sid <<<"$s"); pid=$(jq -r .pid <<<"$s"); label=$(jq -r .label <<<"$s")
+  raw=$(orch_status "$pid"); tr=$(orch_transcript "$sid" "$pid")
+  ago=null; doing=""; asked=""; goal=""
+  if [[ -n "$tr" ]]; then
+    ago=$(orch_age "$tr")
+    recent=$(tail -n 400 "$tr")
+    doing=$(text_of assistant <<<"$recent"); asked=$(text_of user "$HOOK_RE" <<<"$recent")
+    goal=$(jq -r --arg re "$HOOK_RE" 'select(.type == "user") | .message.content | (if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end) | select(test($re)) | capture("(^|\\n)\\[(?<g>[^\\]]+)\\]:").g' <<<"$recent" 2>/dev/null | tail -1 | cut -c1-200)
+  fi
+  case "$raw" in
+    waiting*) state=BLOCKED; reason="${raw#waiting: }" ;;
+    busy*)    state=WORKING; reason="" ;;
+    idle*)    state=IDLE;    reason="" ;;
+    *)        reason=""; if [[ "$ago" != null ]]; then (( ago < 10 )) && state=WORKING || state=IDLE; else state=UNKNOWN; fi ;;
+  esac
+  screen=$(jq -r .bufferTail <<<"$s" | orch_strip_ansi)
+  # A /goal (Stop hook) loop shows on screen as "/goal active" and in the transcript as repeated
+  # "[<goal condition>]: ..." feedback messages that restart the agent whenever it finishes.
+  loop=false; grep -q "/goal active" <<<"$screen" && loop=true
+  if [[ -n "$tr" ]] && (( $(jq -r 'select(.type == "user") | .message.content | (if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end)' <<<"$recent" 2>/dev/null | grep -cE '^\[[^]]{8,}\]:') >= 2 )); then loop=true; fi
+  [[ "$state" == BLOCKED ]] && prompt=$(grep -E "don.t ask again|Do you want|Esc to cancel|Enter to confirm|\(y/n\)" <<<"$screen" | tr -s ' ' | tail -2 | tr '\n' ' ' | cut -c1-200) || prompt=""
+  out=$(jq -c --arg label "$label" --arg sid "$sid" --arg state "$state" --arg reason "$reason" --arg doing "$doing" \
+        --arg asked "$asked" --argjson ago "$ago" --argjson loop "$loop" --arg prompt "$prompt" --arg goal "$goal" --argjson up "$(jq .startedAt <<<"$s")" \
+        '. + [{label:$label, sid:$sid, state:$state, blockedOn:$reason, prompt:$prompt, doing:$doing, lastAsked:$asked, secondsSinceActivity:$ago, hasGoalLoop:$loop, goal:$goal, startedAt:$up}]' <<<"$out")
+done < <(orch_sessions 600 | jq -c '.[]')
+
+if [[ "$1" == "--json" ]]; then echo "$out"; exit 0; fi
+
+echo "$out" | jq -r '.[] |
+  "\(.label)  [\(.state)\(if .blockedOn != "" then ": " + .blockedOn else "" end)]  (id \(.sid[0:8])\(if .secondsSinceActivity != null then ", last activity \(.secondsSinceActivity)s ago" else "" end))"
+  + (if .hasGoalLoop then "\n   note: has a /goal loop\(if .goal != "" then " (\"" + .goal + "\")" else "" end): it restarts itself whenever it goes idle, so idle/busy will flicker" else "" end)
+  + (if .prompt != "" then "\n   waiting on: \(.prompt)" else "" end)
+  + (if .doing != "" then "\n   last said: \(.doing)" else "" end)
+  + (if .lastAsked != "" then "\n   last asked: \(.lastAsked)" else "" end)'

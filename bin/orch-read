@@ -8,11 +8,22 @@ TARGET="${1:?Usage: orch-read <label|sid-prefix> [entries]}"
 N="${2:-8}"
 s=$(orch_resolve "$TARGET") || exit 1
 sid=$(jq -r .sid <<<"$s"); label=$(jq -r .label <<<"$s")
-tr=$(orch_transcript "$sid")
+pid=$(jq -r .pid <<<"$s")
+tr=$(orch_transcript "$sid" "$pid")
+status=$(orch_status "$pid")
+
+# If the agent is blocked on a prompt, show what is on screen first: that is what the user must decide.
+prompt=$(jq -r .bufferTail <<<"$s" | orch_strip_ansi | grep -E "Esc to cancel|Enter to confirm|Tab to amend|Do you want to|don.t ask again|\(y/n\)" | tr -s ' ' | cut -c1-200)
+if [[ "$status" == waiting* || -n "$prompt" ]]; then
+  echo "!! PENDING PROMPT on '$label' (agent status: ${status:-unknown}). Text visible on its screen (only the last ~200 characters can be seen):"
+  echo "$prompt"
+  echo "!! Do not type text at it. Ask the user whether to approve; answer with orch-send --key."
+  echo
+fi
 
 if [[ -n "$tr" ]]; then
   age=$(orch_age "$tr")
-  echo "== $label (${sid:0:8}) — $( (( age < 10 )) && echo "WORKING (activity ${age}s ago)" || echo "idle for ${age}s") =="
+  echo "== $label (${sid:0:8}) — agent reports: ${status:-unknown}; last transcript write ${age}s ago =="
   jq -r 'select((.type == "user" or .type == "assistant") and (.isSidechain | not))
     | (.message.content | if type == "string" then .
         else map(if .type == "text" then .text

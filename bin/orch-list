@@ -4,11 +4,12 @@ source "$(dirname "$0")/_lib.sh"
 
 orch_sessions 400 | jq -c '.[]' | while read -r s; do
   sid=$(jq -r .sid <<<"$s")
-  tr=$(orch_transcript "$sid")
-  if [[ -n "$tr" ]]; then
-    age=$(orch_age "$tr"); (( age < 10 )) && state="working" || state="idle ${age}s"
-  else
-    state="no-transcript"
+  pid=$(jq -r .pid <<<"$s")
+  tr=$(orch_transcript "$sid" "$pid")
+  state=$(orch_status "$pid")
+  if [[ -z "$state" ]]; then
+    if [[ -n "$tr" ]]; then age=$(orch_age "$tr"); (( age < 10 )) && state="working" || state="idle ${age}s"
+    else state="no-transcript"; fi
   fi
   last=$(jq -r '.bufferTail' <<<"$s" | orch_strip_ansi | grep -E '[A-Za-z]' | tail -1 | cut -c1-80)
   printf '%s\t%s\tup %sm\t%s\t%s\n' "$(jq -r .label <<<"$s")" "${sid:0:8}" \
