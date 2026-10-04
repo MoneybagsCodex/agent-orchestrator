@@ -21,7 +21,7 @@ const HOOK_RE = /(^|\n)\[[^\]]{8,}\]:/;
 // ---------------------------------------------------------------- transcripts → turns
 export interface TurnSummary {
   asked: string; said: string; tools: Record<string, number>; files: string[];
-  commands: number; errors: number; startedAt: number; endedAt: number; inProgress: boolean;
+  commands: number; errors: number; errorDetails?: string[]; startedAt: number; endedAt: number; inProgress: boolean;
   loop?: { count: number; goal: string };
   saidLong?: string;   // longer copy of the final message, used for the status summary
   question?: string;   // the question the agent's final message ends by asking the user, if any
@@ -68,6 +68,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
 
   const turns: TurnSummary[] = [];
   let cur: (TurnSummary & { hook?: boolean }) | null = null;
+  const toolNames = new Map<string, string>();
   let lastTool = '', lastKind: Activity['phase'] = 'thinking', lastToolName = '', lastTs = 0;
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -85,7 +86,11 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
     }
     if (e.type === 'user') {
       if (Array.isArray(c) && c.some((b: any) => b.type === 'tool_result')) {
-        for (const b of c) if (b.type === 'tool_result' && b.is_error && cur) cur.errors++;
+        for (const b of c) if (b.type === 'tool_result' && b.is_error && cur) {
+          cur.errors++;
+          const raw = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '');
+          if ((cur.errorDetails ??= []).length < 3) cur.errorDetails.push(`${toolNames.get(b.tool_use_id) ?? 'tool'}: ${raw.replace(/<\/?tool_use_error>/g, '').replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+        }
         continue;
       }
       const text = textOf(c).trim();
@@ -110,6 +115,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
         }
         else if (b.type === 'tool_use') {
           cur.tools[b.name] = (cur.tools[b.name] ?? 0) + 1;
+          if (b.id) toolNames.set(b.id, b.name);
           lastTool = `${b.name} ${b.input?.command ?? b.input?.file_path ?? b.input?.pattern ?? b.input?.to ?? ''}`.trim().slice(0, 100);
           const fp = b.input?.file_path;
           if (fp && /^(Edit|Write|NotebookEdit|MultiEdit)$/.test(b.name)) { const f = path.basename(fp); if (!cur.files.includes(f)) cur.files.push(f); }
@@ -169,13 +175,13 @@ export interface Stand { decisions: string[]; issues: string[]; done: string[] }
 function standFor(sid: string, turns: TurnSummary[]): Stand | null {
   const recent = turns.filter((t) => !t.loop && t.asked).slice(-6);
   if (!recent.length) return null;
-  const body = recent.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked.slice(0, 220)}\n  The agent's final message: ${(t.saidLong || t.said || '(no text reply)').slice(0, 700)}${t.errors ? `\n  Tool errors during this exchange: ${t.errors}` : ''}${t.files.length ? `\n  Files it edited: ${t.files.join(', ')}` : ''}`).join('\n\n');
+  const body = recent.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked.slice(0, 220)}\n  The agent's final message: ${(t.saidLong || t.said || '(no text reply)').slice(0, 700)}${t.errors ? `\n  Tool errors during this exchange (${t.errors}): ${(t.errorDetails ?? []).join(' | ')}` : ''}${t.files.length ? `\n  Files it edited: ${t.files.join(', ')}` : ''}`).join('\n\n');
   const key = `${sid}|stand|${createHash('sha1').update(body).digest('hex').slice(0, 12)}`;
   const hit = headlines[key];
   if (hit) { try { const j = JSON.parse(hit); return { decisions: j.decisions ?? [], issues: j.issues ?? [], done: j.done ?? [] }; } catch { return null; } }
   queueSummary(key, `You are summarizing where a coding agent's work stands, for a person who supervises several agents. Below are its recent exchanges, oldest first. Reply with ONLY a JSON object, no other text, in exactly this shape: {"decisions":[],"issues":[],"done":[]}
 - decisions: things still waiting on the person to decide or answer, including choices the agent put to them. Max 3, each at most 14 words. Only if still unresolved after the last exchange.
-- issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words.
+- issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words. If you mention a tool error, name the tool and say what the error said; never write a vague tool-error line. Skip an error that later exchanges show was worked around or fixed.
 - done: concrete things already completed in this body of work, past tense. Max 5, each at most 12 words.
 Use only what the text says; never guess or add anything. Anything that was fixed or decided in a later exchange must not appear as pending. If a list has nothing, use [].
 
@@ -201,12 +207,12 @@ function runHeadlines() {
 
 // ---------------------------------------------------------------- per-agent token counts (from the transcript's own usage fields)
 interface TokRow { at: number; inp: number; out: number; cr: number }   // inp = fresh input + cache writes; cr = cache reads
-const tokCache = new Map<string, { offset: number; rows: Map<string, TokRow> }>();
-export interface TokenStats { input: number; output: number; cacheRead: number; total: number; perHour: number; turnTotal: number; messages: number; context: number }
+const tokCache = new Map<string, { offset: number; rows: Map<string, TokRow>; compactAt: number }>();
+export interface TokenStats { input: number; output: number; cacheRead: number; total: number; perHour: number; turnTotal: number; messages: number; context: number; compactedAt: number }
 export function tokensFor(file: string, turnStart: number): TokenStats {
   const st = fs.statSync(file);
   let c = tokCache.get(file);
-  if (!c || c.offset > st.size) { c = { offset: 0, rows: new Map() }; tokCache.set(file, c); }
+  if (!c || c.offset > st.size) { c = { offset: 0, rows: new Map(), compactAt: 0 }; tokCache.set(file, c); }
   if (st.size > c.offset) {
     const fd = fs.openSync(file, 'r'); const buf = Buffer.alloc(st.size - c.offset);
     fs.readSync(fd, buf, 0, buf.length, c.offset); fs.closeSync(fd);
@@ -214,6 +220,7 @@ export function tokensFor(file: string, turnStart: number): TokenStats {
     if (end >= 0) {
       c.offset += Buffer.byteLength(text.slice(0, end + 1));
       for (const line of text.slice(0, end).split('\n')) {
+        if (line.includes('Compacted (ctrl+o')) { try { c.compactAt = Date.parse(JSON.parse(line).timestamp) / 1000 || c.compactAt; } catch { /* ignore */ } continue; }
         if (!line.includes('"usage"')) continue;
         let e: any; try { e = JSON.parse(line); } catch { continue; }
         const u = e.message?.usage; if (e.type !== 'assistant' || !u || !e.message?.id || e.isSidechain) continue;
@@ -223,7 +230,7 @@ export function tokensFor(file: string, turnStart: number): TokenStats {
     }
   }
   const now = Date.now() / 1000;
-  const t: TokenStats = { input: 0, output: 0, cacheRead: 0, total: 0, perHour: 0, turnTotal: 0, messages: c.rows.size, context: 0 };
+  const t: TokenStats = { input: 0, output: 0, cacheRead: 0, total: 0, perHour: 0, turnTotal: 0, messages: c.rows.size, context: 0, compactedAt: 0 };
   let latest = -1;
   for (const r of c.rows.values()) {
     const all = r.inp + r.out + r.cr;
@@ -232,6 +239,8 @@ export function tokensFor(file: string, turnStart: number): TokenStats {
     if (now - r.at < 3600) t.perHour += all;
     if (turnStart && r.at >= turnStart) t.turnTotal += all;
   }
+  // A /compact rewrites the conversation but writes no usage row: until the agent's next reply the newest row describes the OLD, larger context.
+  if (c.compactAt && c.compactAt >= latest) { t.compactedAt = c.compactAt; t.context = 0; }
   return t;
 }
 
@@ -336,7 +345,7 @@ export async function buildStatus() {
     const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
     const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, activity, tokens, headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
+      ...a, turns, doing, activity, tokens, recentErrors: turns.filter((t) => t.errorDetails?.length).slice(-2).flatMap((t) => t.errorDetails!.map((d) => ({ at: t.endedAt, text: d }))).slice(-4), headline, outcome, stand: standFor(a.sid, turns), doneLog, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt, reply: t.reply ?? '' })),
     };
