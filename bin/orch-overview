@@ -1,0 +1,14 @@
+#!/bin/bash
+# Every agent and every plan step in one view: state, task, tokens, context vs threshold, plan progress, recent errors.
+ORCH="${ORCH_URL:-http://localhost:3003}"
+curl -sf "$ORCH/overview${1:+?threshold=$1}" | jq -r '
+  def k: if . >= 1000000 then "\((./100000|round)/10)M" elif . >= 1000 then "\((./1000)|round)k" else "\(.)" end;
+  (.agents[] |
+    "\(.name) [\(.id)] \(.state)" + (if .activity then " (\(.activity.phase)\(if .activity.tool != "" then " "+.activity.tool else "" end), \(.activity.seconds)s)" else "" end),
+    "  task: \(.task[0:140])",
+    (if .tokens then "  tokens: in \(.tokens.input|k), out \(.tokens.output|k), cache read \(.tokens.cacheRead|k), \(.tokens.perHour|k)/hr" else empty end),
+    (if .context then "  context: \(if .context.justCompacted then "just compacted" else (.context.tokens|k) end) / flag at \(.context.threshold|k)\(if .context.over then "  OVER THRESHOLD" else "" end)" else empty end),
+    (if .plan.owned > 0 then "  plan steps: \(.plan.done)/\(.plan.owned) done (\(.plan.percent)%): \(.plan.steps|join(", "))" else "  plan steps: none assigned" end),
+    (if (.recentErrors|length) > 0 then "  recent errors: \(.recentErrors|join(" | ")[0:300])" else empty end),
+    (if (.needsYou|length) > 0 then "  NEEDS YOU: \(.needsYou|join("; "))" else empty end)),
+  (if .plan then "PLAN \(.plan.title): \(.plan.percent)% done", (.plan.steps[] | "  [\(.status)] \(.id): \(.title) — owner: \(.owner // "unassigned")" + (if (.deps|length)>0 then " (after \(.deps|join(", ")))" else "" end)) else "No plan set." end)'

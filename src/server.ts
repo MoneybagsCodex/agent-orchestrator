@@ -77,6 +77,7 @@ You can ONLY act through these commands (run them with Bash, exactly as written)
 - orch-status                        START HERE for "what's going on / what is X doing". One digest per agent: state (WORKING / IDLE / BLOCKED on a decision), what it last said, what it was last asked, and notes (e.g. a /goal loop makes idle/busy flicker; that is normal for that agent, not a fault). Report these in plain words; never dump raw output at the user.
 - orch-usage                         the user's real usage-limit status and reset time. For ANY question about usage, limits or what is left, use only this.
 - orch-plan show | set '<json>' | node <id> <todo|active|done|blocked|decide> [note] | clear   the dependency graph the user sees on their dashboard. For multi-step work, set a plan ({"title":...,"nodes":[{"id":"a","title":"...","deps":[],"status":"todo","sid":"<agent id, optional>"}]}); mark a node decide when it needs the user's choice, and update node statuses as agents report. Never mark a node done unless an agent reported it.
+- orch-overview [threshold]          ALL agents and ALL plan steps in one view: state, task, tokens, context vs its flag, plan progress per agent, recent errors, what needs the user. Use this for broad questions (how is everything going, who is working on what, what is blocked). It reads local data and does not message the agents.
 - orch-list                          quick list of live terminals: label, short id, uptime
 - orch-read <id|title> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
 - orch-send <id|title> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction). Slash commands (/compact, /clear, /goal ...) are refused unless you add --confirmed: orch-send <id|title> --confirmed "/compact"
@@ -377,16 +378,45 @@ app.post('/plan', (req, res) => {
   res.json({ ok: true, nodes: clean.length });
 });
 app.post('/plan/node', (req, res) => {
-  const p = readPlan(); const { id, status, note } = req.body ?? {};
+  const p = readPlan(); const { id, status, note, sid } = req.body ?? {};
   const n = p?.nodes.find((x: any) => x.id === id);
   if (!n) return res.status(404).json({ error: `no plan node ${id}` });
   if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
+  if (sid !== undefined) n.sid = sid ? String(sid).slice(0, 40) : undefined;   // owner agent: session id prefix, empty clears
   p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true });
 });
 app.delete('/plan', (_req, res) => { try { fs.unlinkSync(PLAN_FILE); } catch { /* none */ } res.json({ ok: true }); });
 
 app.get('/costs', (_req, res) => res.json(costsSummary()));
+// ---- Overview: every agent and every plan step in ONE response, built from one local snapshot ----
+// Agents are not messaged for this (that would be slow and cost tokens); state, tokens, context and errors are read from
+// the live session registry and the agents' own transcripts, all in the same pass.
+app.get('/overview', async (req, res) => {
+  const threshold = Number(req.query.threshold) >= 10000 ? Number(req.query.threshold) : 150000;
+  const st: any = await buildStatus();
+  const plan = readPlan();
+  const nodes: any[] = plan?.nodes ?? [];
+  const ownerOf = (n: any) => (n.sid ? st.agents.find((a: any) => a.sid.startsWith(n.sid)) : undefined);
+  const agents = st.agents.map((a: any) => {
+    const steps = nodes.filter((n) => ownerOf(n) === a);
+    const done = steps.filter((n) => n.status === 'done').length;
+    return {
+      id: a.sid.slice(0, 8), name: a.topic || a.label, state: a.state, task: a.headline || a.doing || a.lastAsked || '',
+      activity: a.activity ? { phase: a.activity.phase, tool: a.activity.tool, steps: a.activity.steps, seconds: Math.round(Date.now() / 1000 - a.activity.turnStart) } : null,
+      tokens: a.tokens ? { input: a.tokens.input, output: a.tokens.output, cacheRead: a.tokens.cacheRead, total: a.tokens.total, perHour: a.tokens.perHour } : null,
+      context: a.tokens ? { tokens: a.tokens.context, threshold, over: a.tokens.context > threshold, justCompacted: !!a.tokens.compactedAt && !a.tokens.context } : null,
+      plan: { owned: steps.length, done, percent: steps.length ? Math.round((done / steps.length) * 100) : null, steps: steps.map((n) => n.id) },
+      recentErrors: (a.recentErrors ?? []).map((e: any) => e.text), needsYou: st.needsYou.filter((x: any) => x.sid === a.sid).map((x: any) => x.title),
+    };
+  });
+  const unowned = nodes.filter((n) => !ownerOf(n)).map((n) => n.id);
+  res.json({
+    at: Math.floor(Date.now() / 1000), agents, usage: st.usage,
+    plan: plan ? { title: plan.title, steps: nodes.map((n) => ({ id: n.id, title: n.title, status: n.status, deps: n.deps, owner: ownerOf(n)?.topic ?? ownerOf(n)?.label ?? null })),
+      percent: nodes.length ? Math.round((nodes.filter((n) => n.status === 'done').length / nodes.length) * 100) : 0, unownedSteps: unowned } : null,
+  });
+});
 app.get('/tasks', (_req, res) => res.json({ tasks: readTasks().slice(-30) }));
 
 /** POST /stop — interrupt whatever the orchestrator is doing right now (it stays alive and usable). */

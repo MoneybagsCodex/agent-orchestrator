@@ -54,7 +54,7 @@ interface HostOptions {
 
 const ALLOWED = [
   'ListAgents', 'SendMessage', 'ToolSearch',
-  'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-plan:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
+  'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-plan:*)', 'Bash(orch-overview:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
   'Bash(sleep:*)', 'Bash(cut:*)', 'Bash(tail:*)', 'Bash(head:*)', 'Bash(grep:*)',
 ];
 

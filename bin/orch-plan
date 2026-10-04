@@ -1,5 +1,5 @@
 #!/bin/bash
-# The plan graph shown on the dashboard. show | set '<json>' | node <id> <status> [note] | clear
+# The plan graph shown on the dashboard. show | set '<json>' | node <id> <status> [note] | owner <id> <agent-id|none> | clear
 ORCH="${ORCH_URL:-http://localhost:3003}"
 case "$1" in
   show) curl -sf "$ORCH/plan" | jq -r '.plan // "No plan set." | if type=="string" then . else (.title, (.nodes[] | "  [\(.status)] \(.id): \(.title)" + (if (.deps|length)>0 then "  (after: \(.deps|join(", ")))" else "" end))) end' ;;
@@ -7,7 +7,10 @@ case "$1" in
        curl -s -X POST "$ORCH/plan" -H 'Content-Type: application/json' -d "$2" ;;
   node) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan node <id> <status> [note]"; exit 1; }
        curl -s -X POST "$ORCH/plan/node" -H 'Content-Type: application/json' -d "$(jq -n --arg id "$2" --arg s "$3" --arg n "$4" 'if $n=="" then {id:$id,status:$s} else {id:$id,status:$s,note:$n} end')" ;;
+  owner) [[ -z "$2" ]] && { echo "usage: orch-plan owner <id> <agent-id|none>"; exit 1; }
+       sid="$3"; [[ "$sid" == none ]] && sid=""
+       curl -s -X POST "$ORCH/plan/node" -H 'Content-Type: application/json' -d "$(jq -n --arg id "$2" --arg s "$sid" '{id:$id,sid:$s}')" ;;
   clear) curl -s -X DELETE "$ORCH/plan" ;;
-  *) echo "usage: orch-plan show | set '<json>' | node <id> <status> [note] | clear"; exit 1 ;;
+  *) echo "usage: orch-plan show | set '<json>' | node <id> <status> [note] | owner <id> <agent-id|none> | clear"; exit 1 ;;
 esac
 echo
