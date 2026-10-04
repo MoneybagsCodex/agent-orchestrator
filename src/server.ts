@@ -116,6 +116,8 @@ app.post('/chat', (req, res) => {
 
   // One conversation = one Claude session, so only one turn can run at a time. Messages sent while a
   // turn is running wait in a queue (the browser sees {queued:n}) and run next, in order.
+  // Browser refreshes/disconnects must not cancel the work: keep running, just stop writing to the dead socket.
+  const write = (chunk: string) => { if (!res.destroyed && !res.writableEnded) res.write(chunk); };
   let kill: () => void = () => {};
   const start = () => {
   turnBusy = true;
@@ -179,7 +181,7 @@ app.post('/chat', (req, res) => {
             else if (block.type === 'tool_use') payload = { tool: block.input?.command ?? block.name };
             if (!payload) continue;
             isFirstChunk = false;
-            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+            write(`data: ${JSON.stringify(payload)}\n\n`);
           }
         }
       } catch (e) {
@@ -194,11 +196,11 @@ app.post('/chat', (req, res) => {
 
   proc.on('close', (code, signal) => {
     if (code === 0) fs.writeFileSync(STARTED_FILE, '1', 'utf-8');
-    else if (signal) res.write(`data: ${JSON.stringify({ text: '(stopped)' })}\n\n`);
-    else if (isFirstChunk) res.write(`data: ${JSON.stringify({ text: `❌ claude exited with code ${code}` })}\n\n`);
+    else if (signal) write(`data: ${JSON.stringify({ text: '(stopped)' })}\n\n`);
+    else if (isFirstChunk) write(`data: ${JSON.stringify({ text: `❌ claude exited with code ${code}` })}\n\n`);
     if (!isFirstChunk) {
-      res.write('event: end\n');
-      res.write('data: ""\n\n');
+      write('event: end\n');
+      write('data: ""\n\n');
     }
     res.end();
     console.log(`[${new Date().toISOString()}] Orchestrator: closed with code ${code}`);
@@ -209,7 +211,7 @@ app.post('/chat', (req, res) => {
 
   proc.on('error', (err) => {
     console.error(`[Claude spawn error] ${err.message}`);
-    res.write(`data: ${JSON.stringify({ text: `❌ Error: ${err.message}` })}\n\n`);
+    write(`data: ${JSON.stringify({ text: `❌ Error: ${err.message}` })}\n\n`);
     res.end();
     turnBusy = false;
     currentKill = null;
@@ -217,17 +219,11 @@ app.post('/chat', (req, res) => {
   });
   };
 
-  // If the browser goes away, stop this turn (or drop it from the queue). (req 'close' fires as soon
-  // as the body is read, so it must be the response that we watch.)
-  res.on('close', () => {
-    kill();
-    const i = waiting.indexOf(start);
-    if (i >= 0) waiting.splice(i, 1);
-  });
+  // Only POST /stop cancels a turn. A page refresh leaves it running; /history shows the result.
 
   if (turnBusy) {
     waiting.push(start);
-    res.write(`data: ${JSON.stringify({ queued: waiting.length })}\n\n`);
+    write(`data: ${JSON.stringify({ queued: waiting.length })}\n\n`);
   } else {
     start();
   }
@@ -247,6 +243,40 @@ app.get('/status', (req, res) => {
         res.json(body);
       } catch { res.status(500).json({ error: 'bad status output' }); }
     });
+});
+
+/**
+ * GET /history — the orchestrator conversation rebuilt from its Claude transcript, so the UI can
+ * restore the chat after a page refresh: [{role:'user',text} | {role:'assistant',steps:[],text}].
+ */
+app.get('/history', (_req, res) => {
+  try {
+    const projects = path.join(os.homedir(), '.claude', 'projects');
+    const dir = fs.readdirSync(projects).find((d) => fs.existsSync(path.join(projects, d, `${orchestratorSid}.jsonl`)));
+    if (!dir) return res.json({ messages: [] });
+    const out: Array<{ role: 'user' | 'assistant'; text: string; steps?: string[] }> = [];
+    for (const line of fs.readFileSync(path.join(projects, dir, `${orchestratorSid}.jsonl`), 'utf-8').split('\n')) {
+      if (!line.trim()) continue;
+      let e: any;
+      try { e = JSON.parse(line); } catch { continue; }
+      if (e.isSidechain || (e.type !== 'user' && e.type !== 'assistant')) continue;
+      const c = e.message?.content;
+      if (e.type === 'user') {
+        const text = typeof c === 'string' ? c : (Array.isArray(c) ? c.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ') : '');
+        if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text });
+      } else if (Array.isArray(c)) {
+        let cur = out[out.length - 1];
+        if (!cur || cur.role !== 'assistant') { cur = { role: 'assistant', text: '', steps: [] }; out.push(cur); }
+        for (const b of c) {
+          if (b.type === 'text' && b.text?.trim()) cur.text += (cur.text ? '\n\n' : '') + b.text;
+          else if (b.type === 'tool_use') cur.steps!.push(b.input?.command ?? b.name);
+        }
+      }
+    }
+    res.json({ messages: out.filter((m) => m.role === 'user' || m.text || m.steps?.length), busy: turnBusy });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
 });
 
 /** POST /stop — cancel the turn that is currently running (queued messages still run afterwards). */
