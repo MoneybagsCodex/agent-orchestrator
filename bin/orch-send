@@ -48,9 +48,26 @@ if [[ "$SUBMIT" == "true" ]]; then
   fi
 fi
 
-BODY=$(jq -n --arg text "$TEXT" --argjson submit "$SUBMIT" '{text: $text, submit: $submit}')
-RESP=$(curl -s -X POST "$BRIDGE_URL/terminal/$sid/input" -H 'Content-Type: application/json' -d "$BODY")
-if [[ "$(echo "$RESP" | jq -r '.ok' 2>/dev/null)" != "true" ]]; then echo "FAILED: $RESP" >&2; exit 1; fi
+post() { # post <text> <submit>
+  curl -s -X POST "$BRIDGE_URL/terminal/$sid/input" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg text "$1" --argjson submit "$2" '{text: $text, submit: $submit}')"
+}
+ok() { [[ "$(echo "$1" | jq -r '.ok' 2>/dev/null)" == "true" ]]; }
+
+if [[ "$SUBMIT" == "true" ]]; then
+  # Claude's terminal treats a big burst of text as a paste, which swallows the Enter and leaves the message
+  # unsent. Type it in small chunks, then press Enter as its own keystroke. Newlines would submit early.
+  text="${TEXT//$'\n'/ }"; i=0
+  while (( i < ${#text} )); do
+    RESP=$(post "${text:i:20}" false); ok "$RESP" || { echo "FAILED: $RESP" >&2; exit 1; }
+    i=$((i+20)); sleep 0.05
+  done
+  sleep 0.4
+  RESP=$(post $'\r' false)
+else
+  RESP=$(post "$TEXT" false)
+fi
+ok "$RESP" || { echo "FAILED: $RESP" >&2; exit 1; }
 
 # Confirm delivery: for typed text, look for it appearing as a user message in the agent's transcript.
 if [[ "$SUBMIT" == "true" ]]; then
