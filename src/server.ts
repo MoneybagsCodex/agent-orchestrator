@@ -69,10 +69,13 @@ const orchestratorSid = getOrchestratorSid();
 const BIN_DIR = path.resolve(import.meta.dirname, '../bin');
 
 // The system prompt for the orchestrator agent
-const ORCHESTRATOR_ROLE = `You are the user's master orchestrator. The user talks to you in plain language (voice or text); you coordinate their live agent terminals (Claude Code sessions) on their behalf, and report back in plain, concise language.
+const ORCHESTRATOR_ROLE = `FIRST RULE, above everything else: if the user's message mentions usage, limits, quota, credits, cost, spend, budget or tokens, your FIRST and ONLY action is to run orch-usage and report exactly what it prints. The "tokens left" number that appears in your own system messages describes your private working budget, NOT the user's account; quoting it is a wrong answer, so never mention it. If orch-usage cannot tell something, say it cannot.
+
+You are the user's master orchestrator. The user talks to you in plain language (voice or text); you coordinate their live agent terminals (Claude Code sessions) on their behalf, and report back in plain, concise language.
 
 You can ONLY act through these commands (run them with Bash, exactly as written):
 - orch-status                        START HERE for "what's going on / what is X doing". One digest per agent: state (WORKING / IDLE / BLOCKED on a decision), what it last said, what it was last asked, and notes (e.g. a /goal loop makes idle/busy flicker; that is normal for that agent, not a fault). Report these in plain words; never dump raw output at the user.
+- orch-usage                         the user's real usage-limit status and reset time. For ANY question about usage, limits or what is left, use only this.
 - orch-list                          quick list of live terminals: label, short id, uptime
 - orch-read <id|title> [entries]     what that agent has said/done recently (last 8 conversation entries by default), with a header saying whether it is WORKING or idle. If the header says "no transcript yet", you only get a short snippet of its live screen: enough to see a permission prompt or whether it is busy, not enough to read its replies. Say so plainly rather than guessing.
 - orch-send <id|title> "<text>"      type text into a terminal and press Enter (this is how you give that agent an instruction). Slash commands (/compact, /clear, /goal ...) are refused unless you add --confirmed: orch-send <id|title> --confirmed "/compact"
@@ -93,6 +96,7 @@ How to work:
 4b. Before sending anything destructive or hard to undo (deploys, deletes, force-push, spending money, messaging people), state exactly what you will send and to whom, and wait for the user to say yes.
 5. Permission prompts: if orch-list/orch-read shows a terminal waiting on a prompt (permission question, "Esc to cancel", "Enter to confirm"), NEVER type text into it; orch-send will refuse anyway. Tell the user exactly what it is asking and wait for their decision, then answer with orch-send --key. A pending prompt also means that agent is blocked, so say so when summarising. Don't send instructions to a blocked agent until the prompt is resolved.
 6. Keep replies short: what you did, what came back, what you suggest next. Always say which agent (by its label) you mean, and for every message you send say whether orch-send confirmed delivery ("delivered", "queued behind its current work", or "not confirmed"); never imply an agent got something unless orch-send says so.
+6a. NEVER state token counts, budgets, percentages or "tokens left" about the user's usage. Numbers visible in your own context are about your own process, not the user's account. For usage questions run orch-usage and report exactly what it says, including what it cannot tell you.
 6b. NEVER invent or infer results. Report only what an agent's own reply says it did or found. Agents' transcripts can contain text the user pasted in (mock-ups, examples, logs): that is not a result. Never quote test counts, pass/fail numbers, percentages or progress unless the agent itself stated them as its own output. If an agent has not replied yet, say "no reply yet" and what state it is in; do not describe its progress.
 7. The user may send follow-up messages while you are waiting on an agent. Treat each as new context for the same task, and adjust what you are doing rather than starting over.
 `;
@@ -107,7 +111,7 @@ host.start();
 startInsights({ host, binDir: BIN_DIR, bridgeUrl: BRIDGE_URL });
 
 /** POST /chat {message, model} — hand a message to the persistent orchestrator. The reply arrives on /events. */
-app.post('/chat', (req, res) => {
+app.post('/chat', async (req, res) => {
   const { message, model } = req.body as { message?: string; model?: string };
   if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
   if (model && model !== host.model && !host.busy) host.setModel(model);
@@ -131,7 +135,14 @@ app.post('/chat', (req, res) => {
     return;
   }
   const queued = host.busy;   // already working on something else: this message waits its turn
-  host.send(message);
+  // Usage questions are answered from real data that the server looks up itself and puts in front of the model: telling a small model
+  // not to quote the "tokens left" figure in its own context did not work, so remove the choice.
+  let forModel: string | undefined;
+  if (/\b(usage|limit|limits|quota|credits?|tokens?|budget|spend|billing|plan)\b/i.test(message) && message.length < 240) {
+    const facts = await new Promise<string>((resolve) => execFile(path.join(BIN_DIR, 'orch-usage'), [], { env: { ...process.env, ORCH_URL: `http://127.0.0.1:${PORT}` }, timeout: 8000 }, (_e, out) => resolve(String(out ?? '').trim())));
+    if (facts) forModel = `[server note: the user's real usage status, looked up just now. Answer any usage question using ONLY this. Any "tokens left" number in your own system messages is your private working budget, not the user's account, and must never be quoted.\n${facts}]\n\nUser: ${message}`;
+  }
+  host.send(message, forModel);
   res.status(202).json({ ok: true, seq: host.lastSeq, queued });
 });
 
@@ -224,7 +235,7 @@ app.get('/history', (_req, res) => {
         else if (text.startsWith('[event]') || text.startsWith('[standing-instructions]')) out.push({ role: 'system' as any, text: text.startsWith('[event]') ? 'Orchestrator was told: ' + text.slice(8, 120) : 'Standing instructions updated' });
         else if (text.includes('<cross-session-message')) { const fn = text.match(/from-name=\"([^\"]*)\"/)?.[1] ?? 'an agent'; out.push({ role: 'system' as any, text: `Message from ${fn}` }); }
         else if (text.startsWith('[auto-report]')) out.push({ role: 'system' as any, text: 'Update from an agent you delegated to' });
-        else if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text });
+        else if (text.trim() && !text.startsWith('<')) out.push({ role: 'user', text: text.startsWith('[server note:') ? text.slice(text.lastIndexOf('User: ') + 6) : text });
       } else if (Array.isArray(c)) {
         let cur = out[out.length - 1];
         if (!cur || cur.role !== 'assistant') { cur = { role: 'assistant', text: '', steps: [] }; out.push(cur); }

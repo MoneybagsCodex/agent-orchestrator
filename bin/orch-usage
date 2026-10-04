@@ -1,0 +1,16 @@
+#!/bin/bash
+# What is actually known about the user's Claude usage limit. Prints plain sentences, nothing invented.
+# Source: the rate-limit information the orchestrator's own Claude process receives (status + reset time only).
+ORCH="${ORCH_URL:-http://localhost:3003}"
+u=$(curl -sf "$ORCH/status" | jq -c '.usage // empty')
+if [[ -z "$u" ]]; then echo "No usage information has been reported yet (it appears after the orchestrator's first reply)."; exit 0; fi
+status=$(jq -r .status <<<"$u"); type=$(jq -r '.type // "usage"' <<<"$u"); at=$(jq -r '.resetsAt // empty' <<<"$u")
+reset=""; [[ -n "$at" ]] && reset=$(date -r "$at" "+%-I:%M %p on %b %-d")
+case "$status" in
+  allowed) echo "Within limits for the $type window. No warning." ;;
+  allowed_warning) echo "WARNING: approaching the limit for the $type window (still allowed)." ;;
+  *) echo "LIMIT STATE: $status for the $type window." ;;
+esac
+[[ -n "$reset" ]] && echo "That window resets at $reset."
+asof=$(jq -r '.asOf // empty' <<<"$u"); [[ -n "$asof" && "$asof" != "0" ]] && echo "Last reported $(( ($(date +%s) - asof) / 60 )) minutes ago."
+echo "Not available from here: remaining percentage, tokens left, or spend. Do not estimate them."

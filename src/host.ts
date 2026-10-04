@@ -54,7 +54,7 @@ interface HostOptions {
 
 const ALLOWED = [
   'ListAgents', 'SendMessage', 'ToolSearch',
-  'Bash(orch-status:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
+  'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
   'Bash(sleep:*)', 'Bash(cut:*)', 'Bash(tail:*)', 'Bash(head:*)', 'Bash(grep:*)',
 ];
 
@@ -67,10 +67,13 @@ export class OrchestratorHost extends EventEmitter {
   private pendingSends = new Map<string, { to: string; text: string }>();
   private restarting = false;
   rateLimit: Record<string, unknown> | null = null;
+  rateLimitAt = 0;                      // unix seconds when it was last reported
 
   constructor(opts: HostOptions) {
     super();
     this.opts = opts;
+    // The last known usage status survives restarts (it is only learned from a reply, so a fresh process knows nothing yet).
+    try { const u = JSON.parse(fs.readFileSync(path.join(path.dirname(opts.messagesFile), 'usage.json'), 'utf-8')); this.rateLimit = u.info; this.rateLimitAt = u.at; } catch { /* none yet */ }
   }
 
   get busy() { return this.active > 0; }
@@ -144,11 +147,12 @@ export class OrchestratorHost extends EventEmitter {
     this.start();
   }
 
-  send(text: string) {
+  /** `text` is what the user typed (shown in the chat); `forModel` optionally carries extra facts the model should see with it. */
+  send(text: string, forModel?: string) {
     this.start();
     this.push({ kind: 'user', text });
     if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' });
-    this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n');
+    this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: forModel ?? text } }) + '\n');
   }
 
   /** Tell the orchestrator's model something without it appearing as something the user typed. */
@@ -206,6 +210,8 @@ export class OrchestratorHost extends EventEmitter {
       if (this.active > 0 && --this.active === 0) this.push({ kind: 'turn', state: 'end' });
     } else if (e.type === 'rate_limit_event') {
       this.rateLimit = e.rate_limit_info ?? null;
+      this.rateLimitAt = Math.floor(Date.now() / 1000);
+      try { fs.writeFileSync(path.join(path.dirname(this.opts.messagesFile), 'usage.json'), JSON.stringify({ info: this.rateLimit, at: this.rateLimitAt })); } catch { /* ignore */ }
     }
   }
 

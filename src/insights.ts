@@ -289,7 +289,7 @@ export async function buildStatus() {
   for (const t of tasks.filter((x) => x.status === 'stalled')) needs.push({ id: `stalled:${t.id}`, kind: 'stalled', sid: t.sid, title: t.title || 'An agent', detail: `No reply to: "${String(t.text).slice(0, 100)}"`, actions: [] });
   for (const ap of pendingApprovals()) needs.push({ id: `approval:${ap.id}`, kind: 'approval', title: `${ap.agentId}: ${ap.riskLevel ?? ''} risk`, detail: String(ap.action ?? ''), actions: ['approve', 'deny'] });
   const rl: any = deps.host.rateLimit;
-  const usage = rl ? { status: rl.status, resetsAt: rl.resetsAt, type: rl.rateLimitType } : null;
+  const usage = rl ? { status: rl.status, resetsAt: rl.resetsAt, type: rl.rateLimitType, asOf: deps.host.rateLimitAt } : null;
   if (usage && usage.status && usage.status !== 'allowed') needs.push({ id: 'usage', kind: 'usage', title: 'Usage limit', detail: `Status: ${usage.status}${usage.resetsAt ? ` (resets ${new Date(usage.resetsAt * 1000).toLocaleTimeString()})` : ''}`, actions: [] });
 
   return { agents: enriched, summary, needsYou: needs, usage };
