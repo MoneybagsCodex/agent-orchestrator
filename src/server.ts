@@ -130,8 +130,9 @@ app.post('/chat', (req, res) => {
     host.send(message);
     return;
   }
+  const queued = host.busy;   // already working on something else: this message waits its turn
   host.send(message);
-  res.status(202).json({ ok: true, seq: host.lastSeq });
+  res.status(202).json({ ok: true, seq: host.lastSeq, queued });
 });
 
 /**

@@ -133,7 +133,6 @@ const HEADLINES_FILE = path.join(ORCH_DIR, 'headlines.json');
 const headlines: Record<string, string> = readJson<Record<string, string>>(HEADLINES_FILE, {});
 const headlineQueue: Array<{ key: string; prompt: string; apply?: (out: string) => void }> = [];
 const headlineQueued = new Set<string>();
-let headlineBusy = false;
 
 /** What the user is asking this agent to accomplish, in one short line. Cached; computed in the background. */
 function headlineFor(sid: string, asked: string[], said: string): string | null {
@@ -178,35 +177,42 @@ function queueSummary(key: string, prompt: string, apply?: (out: string) => void
   headlineQueued.add(key); headlineQueue.push({ key, prompt, apply }); void runHeadlines();
 }
 
-async function runHeadlines() {
-  if (headlineBusy) return;
-  headlineBusy = true;
-  while (headlineQueue.length) {
+const SUMMARY_WORKERS = 3;      // summaries run a few at a time so a long history is read in minutes, not an hour
+let activeSummaries = 0;
+
+function runHeadlines() {
+  while (activeSummaries < SUMMARY_WORKERS && headlineQueue.length) {
     const job = headlineQueue.shift()!;
-    const prompt = job.prompt;
-    try {
-      const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
-      for (const k of Object.keys(cleanEnv)) if (k.startsWith('CLAUDE_CODE_')) delete cleanEnv[k];
-      const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
-        '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', prompt],
-        { ...cleanEnv, PWD: '/tmp' }, 60000, '/tmp');
-      if (job.apply) { job.apply(out); headlineQueued.delete(job.key); continue; }
-      let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
-      if (job.key.includes('|stand|')) {
-        const m = out.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
-        try { line = m ? JSON.stringify(JSON.parse(m[0])) : ''; } catch { line = ''; }
-      }
-      const clean = job.key.includes('|stand|') ? line : line.replace(/^["'`\-\*\s]+|["'`\s]+$/g, '').slice(0, 140);
-      if (clean) { headlines[job.key] = clean; fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(HEADLINES_FILE, JSON.stringify(headlines, null, 2)); }
-    } catch (e) { console.error('[headline]', (e as Error).message.slice(0, 160)); }
-    headlineQueued.delete(job.key);
+    activeSummaries++;
+    void runJob(job).finally(() => { activeSummaries--; runHeadlines(); });
   }
-  headlineBusy = false;
+}
+
+async function runJob(job: { key: string; prompt: string; apply?: (out: string) => void }) {
+  try {
+    const cleanEnv: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of Object.keys(cleanEnv)) if (k.startsWith('CLAUDE_CODE_')) delete cleanEnv[k];
+    const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
+      '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', job.prompt],
+      { ...cleanEnv, PWD: '/tmp' }, 90000, '/tmp');
+    if (job.apply) { job.apply(out); return; }
+    let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
+    if (job.key.includes('|stand|')) {
+      const m = out.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
+      try { line = m ? JSON.stringify(JSON.parse(m[0])) : ''; } catch { line = ''; }
+    }
+    const clean = job.key.includes('|stand|') ? line : line.replace(/^["'`\-\*\s]+|["'`\s]+$/g, '').slice(0, 140);
+    if (clean) { headlines[job.key] = clean; fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(HEADLINES_FILE, JSON.stringify(headlines, null, 2)); }
+  } catch (e) { console.error('[headline]', (e as Error).message.slice(0, 160)); }
+  finally { headlineQueued.delete(job.key); }
 }
 
 // ---------------------------------------------------------------- digest + status
 function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeout = 15000, cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => execFile(cmd, args, { env, timeout, cwd }, (err, out, errOut) => (err ? reject(new Error(errOut || err.message)) : resolve(out))));
+  return new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { env, timeout, cwd, maxBuffer: 8 * 1024 * 1024 }, (err, out, errOut) => (err ? reject(new Error(errOut || err.message)) : resolve(out)));
+    child.stdin?.end();   // nothing is piped in; without this the CLI waits ~3s for stdin before it starts
+  });
 }
 
 export interface Deps { host: OrchestratorHost; binDir: string; bridgeUrl: string }
@@ -244,11 +250,11 @@ export async function buildStatus() {
     let turns: TurnSummary[] = [], doing = '';
     const tr = transcriptFor(a.pid, a.sid);
     if (tr) { try { ({ turns, doing } = turnsFor(tr, a.state === 'WORKING')); } catch { /* unreadable */ } }
-    let doneLog = { items: [] as DoneItem[], total: 0, exhausted: false };
+    let doneLog = { items: [] as DoneItem[], total: 0, read: 0, of: 0 };
     if (tr) {
       try { ensureDone(a.sid, tr, a.state === 'WORKING'); } catch { /* unreadable */ }
       const l = readLedger(a.sid);
-      doneLog = { items: [...l.items].sort((x, y) => y.at - x.at).slice(0, 150), total: l.items.length, exhausted: l.exhausted };
+      doneLog = { items: [...l.items].sort((x, y) => y.at - x.at).slice(0, 1500), total: l.items.length, read: l.processed.length, of: coverage.get(a.sid)?.total ?? l.processed.length };
     }
     const recentAsks = turns.filter((t) => !t.loop && t.asked).slice(-3).map((t) => t.asked);
     const headline = headlineFor(a.sid, recentAsks, turns.at(-1)?.said ?? '');
@@ -291,86 +297,97 @@ export async function buildStatus() {
 
 
 
-// ---------------------------------------------------------------- "Done" ledger: progress across the whole session
-// The per-tile Done list used to come from the last six exchanges only. This keeps a running ledger instead: finished exchanges
-// are summarized in small background batches (cached, never redone) and the items accumulate, so the tile can show the whole history.
+// ---------------------------------------------------------------- "Done" ledger: every accomplishment across the whole session
+// Exhaustive by design. Every finished exchange in the entire transcript is read (newest first, in the background), the model
+// sees ALL of the agent's messages in the exchange plus the actions it took, and is told to list every distinct accomplishment
+// with no cap. Results are cached per exchange, so nothing is read twice and the list only ever grows.
 const DONE_DIR = path.join(ORCH_DIR, 'done');
+const LEDGER_VERSION = 2;       // bump to rebuild every ledger with a changed method
 interface DoneItem { text: string; at: number }
-interface DoneLedger { items: DoneItem[]; newestAt: number; oldestAt: number; exhausted: boolean }
-const FIRST_RUN_TURNS = 40;     // how far back the first pass reaches; older work is loaded on request
-const BATCH = 8;                // exchanges summarized per model call
+interface DoneLedger { version: number; items: DoneItem[]; processed: number[] }
+const BATCH = 4;                // small batches: bigger ones make the model compress and merge items
+const MAX_PENDING_PER_AGENT = 6;
 
 const ledgerFile = (sid: string) => path.join(DONE_DIR, `${sid}.json`);
-const readLedger = (sid: string): DoneLedger => readJson<DoneLedger>(ledgerFile(sid), { items: [], newestAt: 0, oldestAt: 0, exhausted: false });
+function readLedger(sid: string): DoneLedger {
+  const l = readJson<DoneLedger | null>(ledgerFile(sid), null);
+  return l && l.version === LEDGER_VERSION ? l : { version: LEDGER_VERSION, items: [], processed: [] };
+}
 function writeLedger(sid: string, l: DoneLedger) { fs.mkdirSync(DONE_DIR, { recursive: true }); fs.writeFileSync(ledgerFile(sid), JSON.stringify(l)); }
 
-interface FlatTurn { at: number; asked: string; said: string }
+interface FlatTurn { at: number; asked: string; said: string; did: string[] }
 
-/** Finished exchanges (a request, then the agent's final message) across the WHOLE transcript, oldest first. */
+/** Finished exchanges across the WHOLE transcript, oldest first: the request, everything the agent said, and what it did. */
 function flatTurns(file: string, busy: boolean): FlatTurn[] {
   const items = parseConversation(file);
-  const turns: Array<FlatTurn & { open?: boolean }> = [];
-  let cur: FlatTurn | null = null;
+  const turns: FlatTurn[] = [];
+  let cur: (FlatTurn & { texts: string[] }) | null = null;
+  const flush = () => { if (cur) { cur.said = cur.texts.join(' ').replace(/\s+/g, ' ').slice(0, 1400); turns.push(cur); } };
   for (const it of items) {
-    if (it.role === 'user' || it.role === 'recv') { cur = { at: it.at, asked: (it.role === 'recv' ? `From ${it.who}: ` : '') + it.text.replace(/\s+/g, ' ').slice(0, 220), said: '' }; turns.push(cur); }
-    else if (it.role === 'assistant' && cur) cur.said = it.text.replace(/\s+/g, ' ').slice(0, 600);
+    if (it.role === 'user' || it.role === 'recv') {
+      flush();
+      cur = { at: it.at, asked: (it.role === 'recv' ? `From ${it.who}: ` : '') + it.text.replace(/\s+/g, ' ').slice(0, 260), said: '', did: [], texts: [] };
+    } else if (cur && it.role === 'assistant') cur.texts.push(it.text);
+    else if (cur && (it.role === 'tool' || it.role === 'sent') && cur.did.length < 12) {
+      const line = it.role === 'sent' ? `Messaged ${it.who}` : it.text.replace(/\s+/g, ' ').slice(0, 90);
+      if (!cur.did.includes(line)) cur.did.push(line);
+    }
   }
+  flush();
+  // The newest exchange may still be running: leave it until it is finished.
   const done = turns.filter((t) => t.said);
-  return done;
+  return busy && done.length && turns[turns.length - 1] === done[done.length - 1] ? done.slice(0, -1) : done;
 }
 
-const doneInflight = new Set<string>();
+const doneInflight = new Map<string, Set<string>>();     // sid -> job keys currently queued/running
+const lastEnsure = new Map<string, number>();
+const coverage = new Map<string, { total: number }>();
 
-function summarizeBatch(sid: string, batch: FlatTurn[], direction: 'new' | 'old') {
-  const key = `${sid}|ledger|${createHash('sha1').update(batch.map((t) => t.at + t.asked).join('|')).digest('hex').slice(0, 12)}`;
-  const body = batch.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked}\n  The agent's final message: ${t.said}`).join('\n\n');
-  queueSummary(key, `Below are exchanges between a person and a coding agent, oldest first. Reply with ONLY a JSON array of strings: the concrete things that were completed in these exchanges, past tense, at most 12 words each. Skip questions, plans, and anything the agent says is still broken, unfinished, or was undone. Use only what the text says; never guess. Return [] if nothing was completed.\n\n${body}`, (out) => {
+function summarizeBatch(sid: string, batch: FlatTurn[]) {
+  const key = `${sid}|ledger2|${createHash('sha1').update(batch.map((t) => t.at + t.asked).join('|')).digest('hex').slice(0, 12)}`;
+  const body = batch.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked}\n  What the agent said: ${t.said}${t.did.length ? `\n  Actions it took: ${t.did.join('; ')}` : ''}`).join('\n\n');
+  const jobs = doneInflight.get(sid) ?? new Set<string>(); jobs.add(key); doneInflight.set(sid, jobs);
+  queueSummary(key, `Below are exchanges between a person and a coding agent, oldest first. List EVERY distinct thing that was completed in them: features added, bugs fixed, files created or changed, deployments and releases, decisions that were made and settled, and checks that passed. One item per distinct accomplishment; do not merge or summarize several into one; when unsure whether to include something that was done, include it. Do not list questions, plans, intentions, or anything the agent says is still broken, unfinished, or was undone. Use only what the text says; never guess. Past tense, at most 14 words each, no limit on how many items.\nReply with ONLY a JSON array of objects like [{"exchange":1,"item":"Fixed the rocket launcher spawn timing"}], or [] if nothing was completed.\n\n${body}`, (out) => {
     try {
       const m = out.replace(/```(?:json)?/g, '').match(/\[[\s\S]*\]/);
-      const arr: unknown = m ? JSON.parse(m[0]) : [];
+      const arr: any[] = m ? JSON.parse(m[0]) : [];
       const l = readLedger(sid);
-      const at = batch[batch.length - 1].at;
       const seen = new Set(l.items.map((x) => x.text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
-      for (const t of Array.isArray(arr) ? arr : []) {
-        const text = String(t).trim().slice(0, 140); const norm = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-        if (text && !seen.has(norm)) { seen.add(norm); l.items.push({ text, at }); }
+      for (const r of Array.isArray(arr) ? arr : []) {
+        const text = String(typeof r === 'string' ? r : r?.item ?? '').trim().slice(0, 150);
+        const norm = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const ex = Math.min(Math.max(Number(typeof r === 'object' ? r?.exchange : 1) || 1, 1), batch.length);
+        if (text && !seen.has(norm)) { seen.add(norm); l.items.push({ text, at: batch[ex - 1].at }); }
       }
-      if (direction === 'new') l.newestAt = Math.max(l.newestAt, at); else l.oldestAt = Math.min(l.oldestAt || batch[0].at, batch[0].at);
-      if (!l.oldestAt) l.oldestAt = batch[0].at;
+      for (const t of batch) if (!l.processed.includes(t.at)) l.processed.push(t.at);   // only after a successful read
       writeLedger(sid, l);
-    } catch { /* leave it for the next pass */ }
-    doneInflight.delete(key);
+    } catch { /* not marked processed: it will be retried on a later pass */ }
+    jobs.delete(key);
   });
 }
 
-/** Queue background summaries for any finished exchanges not yet in the ledger. */
+/** Queue reading for exchanges not yet in the ledger, newest first, a few batches at a time. */
 function ensureDone(sid: string, file: string, busy: boolean) {
-  if (doneInflight.size > 40) return;
-  const l = readLedger(sid);
+  const now = Date.now();
+  if (now - (lastEnsure.get(sid) ?? 0) < 12000) return;       // a big transcript is not re-scanned on every poll
+  lastEnsure.set(sid, now);
   const turns = flatTurns(file, busy);
-  if (!turns.length) return;
-  let fresh: FlatTurn[];
-  if (l.newestAt === 0) fresh = turns.slice(-FIRST_RUN_TURNS); else fresh = turns.filter((t) => t.at > l.newestAt);
-  for (let i = 0; i < fresh.length; i += BATCH) {
-    const batch = fresh.slice(i, i + BATCH);
-    // A single trailing exchange is usually still in progress: wait until a second one exists or the agent is idle.
-    if (batch.length < 2 && busy) continue;
-    summarizeBatch(sid, batch, 'new');
+  coverage.set(sid, { total: turns.length });
+  const l = readLedger(sid);
+  const seenAt = new Set(l.processed);
+  const todo = turns.filter((t) => !seenAt.has(t.at));
+  const room = MAX_PENDING_PER_AGENT - (doneInflight.get(sid)?.size ?? 0);
+  if (!todo.length || room <= 0) return;
+  const newestFirst = [...todo].reverse();
+  for (let i = 0; i < room; i++) {
+    const batch = newestFirst.slice(i * BATCH, (i + 1) * BATCH).reverse();     // oldest first inside the batch
+    if (batch.length) summarizeBatch(sid, batch);
   }
 }
 
-/** Load the next older slice of an agent's history into its ledger. */
-export async function backfillDone(sid: string): Promise<{ ok: boolean; message: string }> {
-  const a = (await getAgents()).find((x: any) => x.sid === sid || (sid.length >= 6 && x.sid.startsWith(sid)));
-  if (!a) return { ok: false, message: 'That agent is no longer running.' };
-  const tr = transcriptFor(a.pid, a.sid);
-  if (!tr) return { ok: false, message: 'This agent has no transcript yet.' };
-  const l = readLedger(a.sid);
-  const older = flatTurns(tr, false).filter((t) => !l.oldestAt || t.at < l.oldestAt);
-  if (!older.length) { l.exhausted = true; writeLedger(a.sid, l); return { ok: true, message: 'That is the beginning: nothing earlier to load.' }; }
-  const slice = older.slice(-FIRST_RUN_TURNS);
-  for (let i = 0; i < slice.length; i += BATCH) summarizeBatch(a.sid, slice.slice(i, i + BATCH), 'old');
-  return { ok: true, message: `Reading ${slice.length} earlier exchanges: new items will appear in a minute.` };
+/** Kept for the older UI button: reading the whole history is automatic now. */
+export async function backfillDone(_sid: string): Promise<{ ok: boolean; message: string }> {
+  return { ok: true, message: 'The whole history is read automatically; the count in the Done header shows progress.' };
 }
 
 // ---------------------------------------------------------------- full conversation view
