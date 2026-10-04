@@ -46,7 +46,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Private-Network', 'true');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Orch-UI');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -110,6 +110,25 @@ app.post('/chat', (req, res) => {
   const { message, model } = req.body as { message?: string; model?: string };
   if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
   if (model && model !== host.model && !host.busy) host.setModel(model);
+  // Pages loaded before the event-stream chat don't send this header and still expect the reply streamed on this
+  // response, so keep them working until they are refreshed: stream this turn's events, then close.
+  if (!req.header('x-orch-ui')) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.flushHeaders();
+    let started = false;
+    const onEvent = (e: any) => {
+      if (res.destroyed) return;
+      if (e.kind === 'turn' && e.state === 'start') started = true;
+      else if (e.kind === 'text') res.write(`data: ${JSON.stringify({ text: e.text })}\n\n`);
+      else if (e.kind === 'tool') res.write(`data: ${JSON.stringify({ tool: e.command })}\n\n`);
+      else if (e.kind === 'turn' && e.state === 'end' && started) { host.off('event', onEvent); res.write('event: end\ndata: ""\n\n'); res.end(); }
+    };
+    host.on('event', onEvent);
+    res.on('close', () => host.off('event', onEvent));
+    host.send(message);
+    return;
+  }
   host.send(message);
   res.status(202).json({ ok: true, seq: host.lastSeq });
 });
@@ -359,6 +378,7 @@ app.get('/health', (req, res) => {
     port: PORT,
     orchestratorSid,
     bridgeUrl: BRIDGE_URL,
+    ui: 3,
   });
 });
 
