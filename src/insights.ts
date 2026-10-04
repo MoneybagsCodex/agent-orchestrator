@@ -23,6 +23,7 @@ export interface TurnSummary {
   asked: string; said: string; tools: Record<string, number>; files: string[];
   commands: number; errors: number; startedAt: number; endedAt: number; inProgress: boolean;
   loop?: { count: number; goal: string };
+  saidLong?: string;   // longer copy of the final message, used for the status summary
   question?: string;   // the question the agent's final message ends by asking the user, if any
 }
 
@@ -91,6 +92,7 @@ export function turnsFor(file: string, busy: boolean): { turns: TurnSummary[]; d
       for (const b of c) {
         if (b.type === 'text' && b.text?.trim()) {
           cur.said = b.text.replace(/\s+/g, ' ').trim().slice(0, 240);
+          cur.saidLong = b.text.replace(/\s+/g, ' ').trim().slice(0, 700);
           // Does the message end by asking the user something? Take the last sentence that is a question.
           const tail = b.text.replace(/\s+/g, ' ').trim().slice(-500);
           const sentences = tail.split(/(?<=[.!?])\s+/);
@@ -151,6 +153,26 @@ function outcomeFor(sid: string, asked: string, said: string, files: string[]): 
   return null;
 }
 
+export interface Stand { decisions: string[]; issues: string[]; done: string[] }
+
+/** Where the agent stands: what is waiting on a decision, what is broken or blocked, what is finished. */
+function standFor(sid: string, turns: TurnSummary[]): Stand | null {
+  const recent = turns.filter((t) => !t.loop && t.asked).slice(-6);
+  if (!recent.length) return null;
+  const body = recent.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked.slice(0, 220)}\n  The agent's final message: ${(t.saidLong || t.said || '(no text reply)').slice(0, 700)}${t.errors ? `\n  Tool errors during this exchange: ${t.errors}` : ''}${t.files.length ? `\n  Files it edited: ${t.files.join(', ')}` : ''}`).join('\n\n');
+  const key = `${sid}|stand|${createHash('sha1').update(body).digest('hex').slice(0, 12)}`;
+  const hit = headlines[key];
+  if (hit) { try { const j = JSON.parse(hit); return { decisions: j.decisions ?? [], issues: j.issues ?? [], done: j.done ?? [] }; } catch { return null; } }
+  queueSummary(key, `You are summarizing where a coding agent's work stands, for a person who supervises several agents. Below are its recent exchanges, oldest first. Reply with ONLY a JSON object, no other text, in exactly this shape: {"decisions":[],"issues":[],"done":[]}
+- decisions: things still waiting on the person to decide or answer, including choices the agent put to them. Max 3, each at most 14 words. Only if still unresolved after the last exchange.
+- issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words.
+- done: concrete things already completed in this body of work, past tense. Max 5, each at most 12 words.
+Use only what the text says; never guess or add anything. Anything that was fixed or decided in a later exchange must not appear as pending. If a list has nothing, use [].
+
+${body}`);
+  return null;
+}
+
 function queueSummary(key: string, prompt: string) {
   if (headlineQueued.has(key)) return;
   headlineQueued.add(key); headlineQueue.push({ key, prompt }); void runHeadlines();
@@ -168,8 +190,12 @@ async function runHeadlines() {
       const out = await run('claude', ['-p', '--model', 'claude-haiku-4-5-20251001', '--tools', '', '--permission-mode', 'dontAsk',
         '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', prompt],
         { ...cleanEnv, PWD: '/tmp' }, 60000, '/tmp');
-      const line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
-      const clean = line.replace(/^["'`\-\*\s]+|["'`\s]+$/g, '').slice(0, 140);
+      let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
+      if (job.key.includes('|stand|')) {
+        const m = out.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
+        try { line = m ? JSON.stringify(JSON.parse(m[0])) : ''; } catch { line = ''; }
+      }
+      const clean = job.key.includes('|stand|') ? line : line.replace(/^["'`\-\*\s]+|["'`\s]+$/g, '').slice(0, 140);
       if (clean) { headlines[job.key] = clean; fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(HEADLINES_FILE, JSON.stringify(headlines, null, 2)); }
     } catch (e) { console.error('[headline]', (e as Error).message.slice(0, 160)); }
     headlineQueued.delete(job.key);
@@ -222,7 +248,7 @@ export async function buildStatus() {
     const lastDone = [...turns].reverse().find((t) => !t.loop && !t.inProgress && t.said);
     const outcome = lastDone ? outcomeFor(a.sid, lastDone.asked, lastDone.said, lastDone.files) : null;
     return {
-      ...a, turns, doing, headline, outcome, lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
+      ...a, turns, doing, headline, outcome, stand: standFor(a.sid, turns), lastSaid: lastDone?.said ?? '', asking: lastDone?.question ?? '',
       messages: ledger.filter((m) => m.to === a.peer || (!!a.name && m.to === a.name)).slice(-4).reverse(),
       tasks: tasks.filter((t) => t.sid === a.sid).slice(-3).reverse().map((t) => ({ text: String(t.text).slice(0, 140), status: t.status, sentAt: t.sentAt })),
     };
