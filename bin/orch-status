@@ -27,7 +27,7 @@ while read -r s; do
   fi
   case "$raw" in
     waiting*) state=BLOCKED; reason="${raw#waiting: }" ;;
-    busy*)    state=WORKING; reason="" ;;
+    busy*|shell*|tool*|running*) state=WORKING; reason="" ;;   # "shell" = running a command; the transcript is quiet meanwhile
     idle*)    state=IDLE;    reason="" ;;
     *)        reason=""; if [[ "$ago" != null ]]; then (( ago < 10 )) && state=WORKING || state=IDLE; else state=UNKNOWN; fi ;;
   esac
