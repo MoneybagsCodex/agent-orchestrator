@@ -20,6 +20,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 
 const app = express();
 const PORT = parseInt(process.env.ORCH_PORT ?? '3003', 10);
@@ -35,21 +36,21 @@ if (!fs.existsSync(SESSIONS_DIR)) {
 
 app.use(express.json());
 
-// Get or create a persistent session ID for the orchestrator
+// Persistent orchestrator session. Claude requires a real UUID: the first turn
+// creates it with --session-id, later turns continue it with --resume.
+const SID_FILE = path.join(SESSIONS_DIR, 'orchestrator.sid');
+const STARTED_FILE = path.join(SESSIONS_DIR, 'orchestrator.started');
+
 function getOrchestratorSid(): string {
-  const sidFile = path.join(SESSIONS_DIR, '.sid');
-
-  if (fs.existsSync(sidFile)) {
-    return fs.readFileSync(sidFile, 'utf-8').trim();
-  }
-
-  // Generate a new session ID
-  const sid = `orch-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  fs.writeFileSync(sidFile, sid, 'utf-8');
+  if (fs.existsSync(SID_FILE)) return fs.readFileSync(SID_FILE, 'utf-8').trim();
+  const sid = randomUUID();
+  fs.writeFileSync(SID_FILE, sid, 'utf-8');
+  fs.rmSync(STARTED_FILE, { force: true });
   return sid;
 }
 
 const orchestratorSid = getOrchestratorSid();
+const BIN_DIR = path.resolve(import.meta.dirname, '../bin');
 
 // The system prompt for the orchestrator agent
 const ORCHESTRATOR_ROLE = `You are the master orchestration agent for a developer's terminal environment.
@@ -101,21 +102,25 @@ app.post('/chat', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   // Spawn the Claude CLI process with --resume to maintain session
+  const started = fs.existsSync(STARTED_FILE);
   const claudeArgs = [
-    'claude',
-    '-p',  // pipe mode
+    '-p',  // non-interactive
+    '--verbose',  // required for stream-json output format
     '--output-format', 'stream-json',
-    '--resume', orchestratorSid,
+    ...(started ? ['--resume', orchestratorSid] : ['--session-id', orchestratorSid]),
     '--model', selectedModel,
+    // Only the three helper scripts; the orchestrator can't touch files or run anything else.
+    '--allowedTools', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)',
     '--append-system-prompt', ORCHESTRATOR_ROLE,
     '--', message
   ];
 
-  console.log(`[${new Date().toISOString()}] Orchestrator: ${selectedModel} resume ${orchestratorSid}`);
+  console.log(`[${new Date().toISOString()}] Orchestrator: ${selectedModel} ${started ? 'resume' : 'new'} ${orchestratorSid}`);
   console.log(`[${new Date().toISOString()}] User: ${message.slice(0, 80)}${message.length > 80 ? '...' : ''}`);
 
-  const proc = spawn(claudeArgs[0], claudeArgs.slice(1), {
-    cwd: process.cwd(),
+  const proc = spawn('claude', claudeArgs, {
+    cwd: path.dirname(BIN_DIR),
+    env: { ...process.env, PATH: `${BIN_DIR}:${process.env.PATH}`, BRIDGE_URL },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -137,17 +142,16 @@ app.post('/chat', (req, res) => {
       try {
         const event = JSON.parse(line);
 
-        // stream-json emits: {type:"content-block-start"}, {type:"content-block-delta",delta:{type:"text_delta",text:"..."}}, etc.
-        if (event.type === 'content-block-delta' && event.delta?.type === 'text_delta') {
-          const text = event.delta.text ?? '';
-
-          if (isFirstChunk) {
-            res.write('event: start\n');
-            res.write('data: ""\n\n');
+        // stream-json (--verbose) emits whole messages: {type:"assistant", message:{content:[{type:"text"|"tool_use",...}]}}
+        if (event.type === 'assistant') {
+          for (const block of event.message?.content ?? []) {
+            let text = '';
+            if (block.type === 'text') text = block.text + '\n\n';
+            else if (block.type === 'tool_use') text = `→ ${block.input?.command ?? block.name}\n`;
+            if (!text) continue;
             isFirstChunk = false;
+            res.write(`data: ${JSON.stringify(text)}\n\n`);
           }
-
-          res.write(`data: ${JSON.stringify(text)}\n\n`);
         }
       } catch (e) {
         // Skip malformed lines
@@ -160,6 +164,8 @@ app.post('/chat', (req, res) => {
   });
 
   proc.on('close', (code) => {
+    if (code === 0) fs.writeFileSync(STARTED_FILE, '1', 'utf-8');
+    else if (isFirstChunk) res.write(`data: ${JSON.stringify(`❌ claude exited with code ${code}`)}\n\n`);
     if (!isFirstChunk) {
       res.write('event: end\n');
       res.write('data: ""\n\n');
@@ -176,9 +182,10 @@ app.post('/chat', (req, res) => {
     res.end();
   });
 
-  // Handle client disconnect
-  req.on('close', () => {
-    proc.kill();
+  // Kill claude only if the browser goes away mid-stream. (req 'close' fires as soon as
+  // the body is read, so it must be the response that we watch.)
+  res.on('close', () => {
+    if (proc.exitCode === null) proc.kill();
   });
 });
 
