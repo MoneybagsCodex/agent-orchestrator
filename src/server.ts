@@ -370,14 +370,17 @@ app.post('/plan', (req, res) => {
     const bad = n.deps.find((d: string) => !ids.has(d) || d === n.id);
     if (bad) return res.status(400).json({ error: `node ${n.id} depends on unknown or itself: ${bad}` });
   }
-  writePlan({ title: String(title ?? 'Plan').slice(0, 120), nodes: clean, updatedAt: Date.now() / 1000 });
+  // Keep each step's timeline: when its status last changed, carried over if the step and status are unchanged.
+  const prev = readPlan(); const nowS = Date.now() / 1000;
+  for (const n of clean) { const o = prev?.nodes?.find((x: any) => x.id === n.id); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
+  writePlan({ title: String(title ?? 'Plan').slice(0, 120), nodes: clean, updatedAt: nowS });
   res.json({ ok: true, nodes: clean.length });
 });
 app.post('/plan/node', (req, res) => {
   const p = readPlan(); const { id, status, note } = req.body ?? {};
   const n = p?.nodes.find((x: any) => x.id === id);
   if (!n) return res.status(404).json({ error: `no plan node ${id}` });
-  if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); n.status = status; }
+  if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
   p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true });
 });
