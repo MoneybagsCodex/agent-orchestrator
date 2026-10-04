@@ -98,6 +98,7 @@ long-lived Claude session with its own terminal (such as the video game agent).
 ```
 orch-plan plans | new <plan> "<title>" | show [plan] | set <plan> '<json>' | clear <plan>
 orch-plan node [plan/]<id> <status> [note]      orch-plan owner [plan/]<id> <agent|none>
+orch-plan comments <plan>                       notes kept on a plan (retrospectives, decisions); stored as plan.comments
 orch-plan assign <agent-id> <plan|none>
 orch-overview                                   everything in one view (agents, plans, workers, unrouted agents)
 GET /plans   GET /plan?plan=   GET|POST /routing   GET|POST /workers   GET /overview

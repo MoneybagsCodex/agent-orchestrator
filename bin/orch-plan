@@ -3,6 +3,7 @@
 #   orch-plan plans                                  list plans and which agents are routed where
 #   orch-plan new <plan> "<title>" ["<domain>"]      create an empty plan (id: lowercase letters, digits, dashes)
 #   orch-plan show [plan]                            show one plan, or all of them
+#   orch-plan comments <plan>                        notes recorded on a plan (retrospectives, decisions)
 #   orch-plan set <plan> '<json>'                    replace a plan's steps: {"nodes":[{"id","title","deps","status","sid"}]}
 #   orch-plan node [plan/]<id> <status> [note]       status: todo|active|done|blocked|decide
 #   orch-plan owner [plan/]<id> <agent-id|none>      assign a step to an agent
@@ -27,6 +28,8 @@ case "$1" in
        post /plan/node "$(jq -n --arg p "$P" --arg id "$N" --arg s "$sid" '{id:$id,sid:$s} + (if $p!="" then {plan:$p} else {} end)')" ;;
   assign) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan assign <agent-id> <plan|none>"; exit 1; }
        post /routing "$(jq -n --arg a "$2" --arg p "$3" '{agent:$a,plan:$p}')" ;;
+  comments) [[ -z "$2" ]] && { echo "usage: orch-plan comments <plan>"; exit 1; }
+       curl -sf "$ORCH/plan?plan=$2" | jq -r '.plan.comments // [] | if length==0 then "No comments on this plan." else .[] | "[\(.at)] \(.author)\n\(.text)\n" end' ;;
   clear) [[ -z "$2" ]] && { echo "usage: orch-plan clear <plan>"; exit 1; }
        curl -s -X DELETE "$ORCH/plan?plan=$2"; echo ;;
   *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

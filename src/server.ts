@@ -551,7 +551,7 @@ app.post('/plan', (req, res) => {
   // Keep each step's timeline: when its status last changed, carried over if the step and status are unchanged.
   const nowS = Date.now() / 1000;
   for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); n.createdAt = o?.createdAt ?? (o ? undefined : nowS); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
-  writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, nodes: clean, updatedAt: nowS });
+  writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, comments: existing?.comments, nodes: clean, updatedAt: nowS });
   res.json({ ok: true, plan: planId, nodes: clean.length });
 });
 app.post('/plan/node', (req, res) => {
