@@ -47,7 +47,8 @@ if [[ "$SUBMIT" == "true" ]]; then
   if [[ -n "$tr" ]]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       sleep 1
-      if tail -n 60 "$tr" | grep -qF -- "$(jq -n --arg n "$needle" '$n | @json | .[1:-1]')"; then echo "delivered to $label: $DESC (it appears in the agent's transcript)"; exit 0; fi
+      cmdname=""; [[ "$TEXT" == /* ]] && cmdname="<command-name>${TEXT%% *}</command-name>"
+      if tail -n 60 "$tr" | grep -qF -- "$(jq -n --arg n "$needle" '$n | @json | .[1:-1]')" || { [[ -n "$cmdname" ]] && tail -n 60 "$tr" | grep -qF -- "$cmdname"; }; then echo "delivered to $label: $DESC (it appears in the agent's transcript)"; exit 0; fi
     done
     st=$(orch_status "$pid")
     echo "sent to $label: $DESC. NOT CONFIRMED in its transcript after 10s (agent reports: ${st:-unknown}). If it is busy the message is probably queued behind its current work; check with orch-read before assuming it arrived."

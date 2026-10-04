@@ -35,7 +35,14 @@ while read -r s; do
   # A /goal (Stop hook) loop shows on screen as "/goal active" and in the transcript as repeated
   # "[<goal condition>]: ..." feedback messages that restart the agent whenever it finishes.
   loop=false; grep -q "/goal active" <<<"$screen" && loop=true
-  if [[ -n "$tr" ]] && (( $(jq -r 'select(.type == "user") | .message.content | (if type == "string" then . else map(select(.type == "text") | .text) | join(" ") end)' <<<"$recent" 2>/dev/null | grep -cE '^\[[^]]{8,}\]:') >= 2 )); then loop=true; fi
+  if [[ -n "$tr" ]]; then
+    # Hook-feedback messages (H) and "Goal cleared" notices (C) in order: still a loop only if >=2 H and the last is H.
+    seq=$(jq -r --arg re "$HOOK_RE" '
+      if .type == "user" and ((.message.content | if type == "string" then . else map(.text // "") | join(" ") end) | test($re)) then "H"
+      elif .type == "system" and ((.content // "") | tostring | test("Goal cleared")) then "C" else empty end' <<<"$recent" 2>/dev/null | tr -d '\n')
+    nH=$(tr -cd 'H' <<<"$seq" | wc -c)
+    if (( nH >= 2 )) && [[ "$seq" == *H ]]; then loop=true; else loop=false; goal=""; fi
+  fi
   [[ "$state" == BLOCKED ]] && prompt=$(grep -E "don.t ask again|Do you want|Esc to cancel|Enter to confirm|\(y/n\)" <<<"$screen" | tr -s ' ' | tail -2 | tr '\n' ' ' | cut -c1-200) || prompt=""
   out=$(jq -c --arg label "$label" --arg sid "$sid" --arg state "$state" --arg reason "$reason" --arg doing "$doing" \
         --arg asked "$asked" --argjson ago "$ago" --argjson loop "$loop" --arg prompt "$prompt" --arg goal "$goal" --argjson up "$(jq .startedAt <<<"$s")" \

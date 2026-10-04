@@ -24,12 +24,17 @@ fi
 if [[ -n "$tr" ]]; then
   age=$(orch_age "$tr")
   echo "== $label (${sid:0:8}) — agent reports: ${status:-unknown}; last transcript write ${age}s ago =="
-  jq -r 'select((.type == "user" or .type == "assistant") and (.isSidechain | not))
-    | (.message.content | if type == "string" then .
-        else map(if .type == "text" then .text
-                 elif .type == "tool_use" then "[tool: \(.name) \((.input.command // .input.file_path // .input.pattern // "") | tostring | .[0:80])]"
-                 else empty end) | join("\n") end) as $t
-    | select($t != "") | "\(.type | ascii_upcase): \($t | .[0:1500])"' "$tr" | tail -n "$N"
+  jq -r '
+    def txt: .message.content | if type == "string" then . else map(
+        if .type == "text" then .text
+        elif .type == "tool_use" then "[tool: \(.name) \((.input.command // .input.file_path // .input.pattern // "") | tostring | .[0:80])]"
+        else empty end) | join("\n") end;
+    if (.type == "user" or .type == "assistant") and (.isSidechain | not) then
+      (txt) as $t | select($t != "") | "\(.type | ascii_upcase): \($t | .[0:1500])"
+    elif .type == "system" and (.subtype == "local_command" or .subtype == "informational") then
+      ((.content // "") | tostring | gsub("<[^>]+>"; " ") | gsub("\\s+"; " ") | .[0:300]) as $c
+      | select($c | test("\\S")) | "SYSTEM: \($c)"
+    else empty end' "$tr" | tail -n "$N"
 else
   echo "== $label (${sid:0:8}) — no transcript yet; live screen text (may be short/noisy) =="
   jq -r .bufferTail <<<"$s" | orch_strip_ansi | grep -E '[A-Za-z0-9]' | tail -20
