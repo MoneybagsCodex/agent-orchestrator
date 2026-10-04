@@ -45,14 +45,14 @@ while read -r s; do
   fi
   [[ "$state" == BLOCKED ]] && prompt=$(grep -E "don.t ask again|Do you want|Esc to cancel|Enter to confirm|\(y/n\)" <<<"$screen" | tr -s ' ' | tail -2 | tr '\n' ' ' | cut -c1-200) || prompt=""
   out=$(jq -c --arg label "$label" --arg sid "$sid" --arg state "$state" --arg reason "$reason" --arg doing "$doing" \
-        --arg asked "$asked" --argjson ago "$ago" --argjson loop "$loop" --arg prompt "$prompt" --arg goal "$goal" --arg topic "$topic" --argjson up "$(jq .startedAt <<<"$s")" \
-        '. + [{label:$label, sid:$sid, state:$state, blockedOn:$reason, prompt:$prompt, doing:$doing, lastAsked:$asked, secondsSinceActivity:$ago, hasGoalLoop:$loop, goal:$goal, topic:$topic, startedAt:$up}]' <<<"$out")
+        --arg asked "$asked" --argjson ago "$ago" --argjson loop "$loop" --arg prompt "$prompt" --arg goal "$goal" --arg topic "$topic" --argjson pid "$pid" --arg sname "$(jq -r .name ~/.claude/sessions/$pid.json 2>/dev/null)" --arg peer "uds:/tmp/cc-socks/$pid.sock" --argjson up "$(jq .startedAt <<<"$s")" \
+        '. + [{label:$label, sid:$sid, state:$state, blockedOn:$reason, prompt:$prompt, doing:$doing, lastAsked:$asked, secondsSinceActivity:$ago, hasGoalLoop:$loop, goal:$goal, topic:$topic, pid:$pid, name:$sname, peer:$peer, startedAt:$up}]' <<<"$out")
 done < <(orch_sessions 600 | jq -c '.[]')
 
 if [[ "$1" == "--json" ]]; then echo "$out"; exit 0; fi
 
 echo "$out" | jq -r '.[] |
-  "\"\(if .topic == "" then "untitled" else .topic end)\" [\(.sid[0:8])] (panel label: \(.label))  [\(.state)\(if .blockedOn != "" then ": " + .blockedOn else "" end)]  (\(if .secondsSinceActivity != null then "last activity \(.secondsSinceActivity)s ago" else "" end))"
+  "\"\(if .topic == "" then "untitled" else .topic end)\" [\(.sid[0:8])] (panel label: \(.label))  peer: \(.peer)  [\(.state)\(if .blockedOn != "" then ": " + .blockedOn else "" end)]  (\(if .secondsSinceActivity != null then "last activity \(.secondsSinceActivity)s ago" else "" end))"
   + (if .hasGoalLoop then "\n   note: has a /goal loop\(if .goal != "" then " (\"" + .goal + "\")" else "" end): it restarts itself whenever it goes idle, so idle/busy will flicker" else "" end)
   + (if .prompt != "" then "\n   waiting on: \(.prompt)" else "" end)
   + (if .doing != "" then "\n   last said: \(.doing)" else "" end)
