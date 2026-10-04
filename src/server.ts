@@ -441,9 +441,10 @@ app.post('/plan', (req, res) => {
     ids.add(id);
     clean.push({ id, title: String(n.title ?? id).slice(0, 120), deps: Array.isArray(n.deps) ? n.deps.map(String) : [],
       status: PLAN_STATUS.includes(n.status) ? n.status : 'todo', sid: n.sid ? String(n.sid) : undefined, worker: n.worker ? String(n.worker).slice(0, 40) : undefined,
-      step: typeof n.step === 'number' ? n.step : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
+      step: typeof n.step === 'number' ? n.step : undefined, parent: n.parent ? String(n.parent).slice(0, 40) : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
   }
   for (const n of clean) {
+    if (n.parent && (!ids.has(n.parent) || n.parent === n.id)) return res.status(400).json({ error: `node ${n.id} has unknown parent: ${n.parent}` });
     const bad = n.deps.find((d: string) => !ids.has(d) || d === n.id);
     if (bad) return res.status(400).json({ error: `node ${n.id} depends on unknown or itself: ${bad}` });
   }
@@ -518,8 +519,9 @@ app.post('/workers', (req, res) => {
   if (!node && b.stepTitle) {
     plan = readPlan(String(b.plan ?? ''));
     if (!plan) return res.status(400).json({ error: `stepTitle needs plan: which plan does this worker belong to? (plans: ${planIdsHint()})` });
+    if (b.parent && !plan.nodes.some((n: any) => n.id === b.parent)) return res.status(400).json({ error: `parent step "${b.parent}" is not in plan ${plan.id}` });
     if (plan.nodes.length >= 40) return res.status(400).json({ error: `plan ${plan.id} is full (40 steps)` });
-    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, statusAt: nowS, startedAt: nowS };
+    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, parent: b.parent ? String(b.parent).slice(0, 40) : undefined, statusAt: nowS, startedAt: nowS };
     plan.nodes.push(node);
   }
   if (node && b.status !== undefined && node.status !== STEP_OF[w.status]) {
