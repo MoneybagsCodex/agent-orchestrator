@@ -1,16 +1,16 @@
 import express, { Request, Response } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
 import { Orchestrator } from './orchestrator';
 import { parseMission } from './mission-parser';
+import { Conversation } from './conversation';
 
 const app = express();
 const PORT = 3003;
-const client = new Anthropic();
 
 app.use(express.json());
 
 let currentOrchestrator: Orchestrator | null = null;
 let executionResults: any[] = [];
+let currentConversation: Conversation | null = null;
 
 app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', port: PORT });
@@ -41,10 +41,14 @@ app.get('/status', (req: Request, res: Response) => {
 
 app.post('/command', async (req: Request, res: Response) => {
   try {
-    const { command } = req.body;
+    const { command, model = 'claude-opus-5-5' } = req.body;
     if (!command) {
       return res.status(400).json({ error: 'Command required' });
     }
+
+    // Initialize conversation
+    const conversation = new Conversation(model);
+    const plan = await conversation.generateInitialPlan(command);
 
     // Parse mission and initialize orchestrator
     const workflow = parseMission(command);
@@ -52,19 +56,39 @@ app.post('/command', async (req: Request, res: Response) => {
     orchestrator.initialize();
 
     currentOrchestrator = orchestrator;
+    currentConversation = conversation;
     executionResults = [];
 
     // Start execution loop (non-blocking)
-    executeWorkflow(orchestrator, command);
+    executeWorkflow(orchestrator, command, conversation);
 
     res.json({
-      status: 'accepted',
-      summary: `Executing: ${command}`,
+      status: 'planning',
+      plan,
       workflow: {
         id: workflow.id,
         title: workflow.title,
         phaseCount: workflow.phases.length,
       },
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+app.post('/decision', async (req: Request, res: Response) => {
+  try {
+    const { decision } = req.body;
+    if (!decision || !currentConversation) {
+      return res.status(400).json({ error: 'Decision required or no active conversation' });
+    }
+
+    const response = await currentConversation.respondToUserDecision(decision);
+    res.json({
+      status: 'acknowledged',
+      response,
     });
   } catch (error) {
     res.status(500).json({
@@ -106,15 +130,37 @@ app.get('/response', async (req: Request, res: Response) => {
   }
 });
 
-async function executeWorkflow(orchestrator: Orchestrator, originalCommand: string) {
+async function executeWorkflow(
+  orchestrator: Orchestrator,
+  originalCommand: string,
+  conversation: Conversation
+) {
   try {
     const startTime = Date.now();
+    let phaseCheckpoint = 0;
+
     while (orchestrator.getProgress().percentComplete < 100) {
       const nextPhases = orchestrator.getNextPhasesToExecute();
       if (nextPhases.length === 0) break;
 
       for (const phaseId of nextPhases) {
         await orchestrator.executeStep(phaseId);
+      }
+
+      // After every 2-3 phases, synthesize interim results
+      const completedCount = orchestrator.workflow.phases.filter(p => p.state === 'done').length;
+      if (completedCount >= phaseCheckpoint + 2 || completedCount === orchestrator.workflow.phases.length) {
+        const completedPhases = orchestrator.workflow.phases.filter(p => p.state === 'done');
+        await conversation.synthesizePhaseResults(
+          completedPhases,
+          completedPhases.map(p => ({
+            name: p.description,
+            agent: p.assignedAgent?.name,
+            output: p.output,
+          })),
+          orchestrator.getRiskLevel()
+        );
+        phaseCheckpoint = completedCount;
       }
 
       // Simulate execution time
