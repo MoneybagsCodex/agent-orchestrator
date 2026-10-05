@@ -1,3 +1,5 @@
+> **Setup and running:** see [SETUP.md](SETUP.md). The demo below is the original prototype and is out of date.
+
 # Agent Orchestrator — Demo
 
 Master orchestration agent + workflow engine for coordinating multiple Claude agents.
