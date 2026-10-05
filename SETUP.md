@@ -1,9 +1,9 @@
 # Orchestrator setup
 
-Covers both repos: `agent-orchestrator` (server and `bin/orch-*` scripts, port 3003) and `cockpit-orchestrator` (dashboard, port 4000). Validated from fresh clones with an empty `$HOME` on 2026-10-05.
+Covers both repos: `agent-orchestrator` (server and `bin/orch-*` scripts, port 3003) and `master-orchestrator` (dashboard, port 4000). Validated from fresh clones with an empty `$HOME` on 2026-10-05.
 
 ```
-browser :4000 (cockpit-orchestrator) --> :3003 (agent-orchestrator) --> persistent `claude` process
+browser :4000 (master-orchestrator) --> :3003 (agent-orchestrator) --> persistent `claude` process
                   |                              |
                   +--- /api/terminals -----------+--> bridge :3002 (operator-cockpit) --> your live agent terminals
 ```
@@ -24,7 +24,7 @@ macOS or Linux. The tools in `bin/` are bash.
 
 ```bash
 git clone <agent-orchestrator>   && cd agent-orchestrator   && npm ci && cd ..
-git clone <cockpit-orchestrator> && cd cockpit-orchestrator && npm ci
+git clone <master-orchestrator> && cd master-orchestrator && npm ci
 ```
 
 There is no build step. The server runs TypeScript directly through `tsx`, and the dashboard is a static page served by `node`.
@@ -39,8 +39,8 @@ All optional; defaults work on one machine.
 | `ORCH_PORT` | agent-orchestrator | `3003` | Orchestrator HTTP port |
 | `BRIDGE_URL` | both repos and `bin/orch-*` | `http://localhost:3002` | operator-cockpit bridge |
 | `ORCH_MAX_WORKERS` | agent-orchestrator | `5` | Cap on concurrent sub-agent workers |
-| `PORT` | cockpit-orchestrator | `4000` | Dashboard port |
-| `ORCHESTRATOR_URL` | cockpit-orchestrator | `http://localhost:3003` | Where the browser finds the orchestrator (served to the page via `/orch-url.js`) |
+| `PORT` | master-orchestrator | `4000` | Dashboard port |
+| `ORCHESTRATOR_URL` | master-orchestrator | `http://localhost:3003` | Where the browser finds the orchestrator (served to the page via `/orch-url.js`) |
 | `OPERATOR_STATE_DIR` | `bin/orch-*` only | `~/.operator-state` | The server itself always uses `~/.operator-state`; override `$HOME` to relocate it |
 
 Run both processes with the same `BRIDGE_URL`. The dashboard calls the orchestrator straight from the browser, and the orchestrator only accepts `localhost` / `127.0.0.1` origins.
@@ -62,7 +62,7 @@ Two terminals (or `nohup ... &`). Start the bridge first if you want live agents
 # orchestrator (:3003)
 cd agent-orchestrator   && npm run server
 # dashboard (:4000)
-cd cockpit-orchestrator && npm start
+cd master-orchestrator && npm start
 ```
 
 Open http://localhost:4000.
