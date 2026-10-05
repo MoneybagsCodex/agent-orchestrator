@@ -93,3 +93,8 @@ To restart the orchestrator: `kill $(lsof -ti :3003)`, then start it again. Rest
 | Dollar figures look low or high | Estimates use Haiku 4.5 rates unless the model is priced; they are not billing data. |
 | `npm run build` / `typecheck` errors in `src/demo.ts` | Known: legacy prototype files. Not needed to run. |
 | Browser blocked calling :3003 | CORS allows only `localhost` / `127.0.0.1` origins. Open the dashboard via `localhost`, not a LAN IP. |
+
+
+---
+
+Developed by Joshua Minton. Copyright © 2026 Joshua Minton. Property of Joshua Minton; all rights reserved.
