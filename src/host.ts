@@ -50,7 +50,11 @@ interface HostOptions {
   binDir: string;
   bridgeUrl: string;
   model: string;
+  /** Context size (tokens) at which the host compacts the conversation on its own when idle; 0 or absent turns it off. Read each time so it can change live. */
+  compactAt?: () => number;
 }
+
+export interface Compaction { at: number; pre: number; post: number; trigger: string; ms: number }
 
 const ALLOWED = [
   'ListAgents', 'SendMessage', 'ToolSearch',
@@ -66,6 +70,10 @@ export class OrchestratorHost extends EventEmitter {
   private ring: SeqEvent[] = [];
   private pendingSends = new Map<string, { to: string; text: string }>();
   private restarting = false;
+  ctxTokens = 0;                        // size of the conversation the last model call read (input + cache), the real context rather than a per-turn sum
+  compacting = false;
+  private lastCompactTry = 0;
+  compactions: Compaction[] = [];
   rateLimit: Record<string, unknown> | null = null;
   rateLimitAt = 0;                      // unix seconds when it was last reported
 
@@ -74,6 +82,7 @@ export class OrchestratorHost extends EventEmitter {
     this.opts = opts;
     // The last known usage status survives restarts (it is only learned from a reply, so a fresh process knows nothing yet).
     try { const u = JSON.parse(fs.readFileSync(path.join(path.dirname(opts.messagesFile), 'usage.json'), 'utf-8')); this.rateLimit = u.info; this.rateLimitAt = u.at; } catch { /* none yet */ }
+    try { this.compactions = JSON.parse(fs.readFileSync(path.join(path.dirname(opts.messagesFile), 'compactions.json'), 'utf-8')); } catch { /* none yet */ }
   }
 
   get busy() { return this.active > 0; }
@@ -102,12 +111,11 @@ export class OrchestratorHost extends EventEmitter {
       '--name', 'master-orchestrator',
       ...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
       // Locked down: only these tools, anything else is denied outright; user-level settings (with their
-      // broad allow rules) are ignored; no MCP servers, no skills.
+      // broad allow rules) are ignored; no MCP servers; no Skill tool. (Slash commands stay enabled: the host sends /compact to itself.)
       '--tools', 'Bash,ListAgents,SendMessage,ToolSearch',
       '--permission-mode', 'dontAsk',
       '--setting-sources', 'project',
       '--strict-mcp-config',
-      '--disable-slash-commands',
       '--allowedTools', ...ALLOWED,
       '--append-system-prompt', this.opts.role,
     ];
@@ -131,7 +139,7 @@ export class OrchestratorHost extends EventEmitter {
     p.stderr!.on('data', (d) => console.error('[host stderr]', d.toString('utf-8').slice(0, 300)));
     p.on('exit', (code, signal) => {
       this.proc = null;
-      this.active = 0;
+      this.active = 0; this.compacting = false;
       if (!this.restarting) this.push({ kind: 'error', text: `Orchestrator process exited (${signal ?? code}). It restarts on your next message.` });
       this.restarting = false;
     });
@@ -153,6 +161,28 @@ export class OrchestratorHost extends EventEmitter {
     this.push({ kind: 'user', text });
     if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' });
     this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: forModel ?? text } }) + '\n');
+  }
+
+  private autoTriggered = false;
+  /** When idle and the context is past the threshold, ask the session to /compact itself. The summary replaces the old turns, so every later turn re-reads far less.
+   *  Guarded: never while a turn is running, never twice within 10 minutes (if the summary is still over the line, compacting again would loop), and a failed one is not retried at once. */
+  private maybeCompact() {
+    const at = this.opts.compactAt?.() ?? 0;
+    if (!at || this.compacting || !this.proc || this.active > 0 || this.ctxTokens < at) return;
+    const last = Math.max(this.lastCompactTry, this.compactions[this.compactions.length - 1]?.at ?? 0);
+    if (Date.now() / 1000 - last < 600) return;
+    this.lastCompactTry = Math.floor(Date.now() / 1000);
+    this.compacting = true; this.autoTriggered = true;
+    console.log(`[host] context ${this.ctxTokens} >= ${at}: compacting`);
+    this.push({ kind: 'notify', level: 'info', title: 'Compacting orchestrator context', text: `Context reached ${Math.round(this.ctxTokens / 1000)}k tokens (limit ${Math.round(at / 1000)}k); summarizing the conversation.` });
+    this.sendCompact();
+  }
+
+  /** Run /compact on the session now (also what the automatic trigger uses). */
+  sendCompact() {
+    this.start();
+    if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' });
+    this.proc!.stdin!.write(JSON.stringify({ type: 'user', message: { role: 'user', content: '/compact' } }) + '\n');
   }
 
   /** Tell the orchestrator's model something without it appearing as something the user typed. */
@@ -183,7 +213,18 @@ export class OrchestratorHost extends EventEmitter {
     if (e.type === 'command_lifecycle') {
       // Turns triggered by an incoming peer message announce themselves here; user-sent turns do not (send() counts those).
       if (e.state === 'started') { if (this.active++ === 0) this.push({ kind: 'turn', state: 'start' }); }
+    } else if (e.type === 'system' && e.subtype === 'compact_boundary') {
+      const m = e.compact_metadata ?? {};
+      const c: Compaction = { at: Math.floor(Date.now() / 1000), pre: m.pre_tokens ?? 0, post: m.post_tokens ?? 0, trigger: this.autoTriggered ? 'auto' : (m.trigger ?? 'manual'), ms: m.duration_ms ?? 0 };
+      this.ctxTokens = c.post; this.compacting = false;
+      this.compactions = [...this.compactions, c].slice(-20);
+      try { fs.writeFileSync(path.join(path.dirname(this.opts.messagesFile), 'compactions.json'), JSON.stringify(this.compactions)); } catch { /* best effort */ }
+      this.push({ kind: 'notify', level: 'info', title: 'Orchestrator context compacted', text: `${c.trigger === 'auto' ? 'Automatic' : 'Manual'} compaction: ${Math.round(c.pre / 1000)}k to ${Math.round(c.post / 1000)}k tokens. Every turn from here re-reads less.` });
+      this.autoTriggered = false;
+      this.emit('compacted', c);
     } else if (e.type === 'assistant') {
+      const u = e.message?.usage;
+      if (u) this.ctxTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
       for (const b of e.message?.content ?? []) {
         if (b.type === 'text' && b.text?.trim()) this.push({ kind: 'text', text: b.text });
         else if (b.type === 'tool_use') {
@@ -209,7 +250,7 @@ export class OrchestratorHost extends EventEmitter {
       if (e.subtype === 'success') { try { fs.writeFileSync(this.opts.startedFile, '1'); } catch { /* ignore */ } }
       this.emit('result-usage', e);
       // Every turn, whoever started it, ends with a result event.
-      if (this.active > 0 && --this.active === 0) this.push({ kind: 'turn', state: 'end' });
+      if (this.active > 0 && --this.active === 0) { this.push({ kind: 'turn', state: 'end' }); this.compacting = false; this.maybeCompact(); }
     } else if (e.type === 'rate_limit_event') {
       this.rateLimit = e.rate_limit_info ?? null;
       this.rateLimitAt = Math.floor(Date.now() / 1000);

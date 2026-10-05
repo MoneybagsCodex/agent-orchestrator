@@ -3,6 +3,11 @@
 ORCH="${ORCH_URL:-http://localhost:3003}"
 curl -sf "$ORCH/overview${1:+?threshold=$1}" | jq -r '
   def k: if . >= 1000000 then "\((./100000|round)/10)M" elif . >= 1000 then "\((./1000)|round)k" else "\(.)" end;
+  (.orchestrator | "ORCHESTRATOR (me) [\(.model // "?")]\(if .compacting then " COMPACTING" else "" end)",
+    "  tokens: in \(.cumulative.input|k), out \(.cumulative.output|k), cache read \(.cumulative.cacheRead|k), \(.perHour.tokens|k)/hr  (cumulative over \(.turns) turns, $\(.cumulative.usd))",
+    (if .lastTurn then "  last turn: in \(.lastTurn.input|k), out \(.lastTurn.output|k), cache read \(.lastTurn.cacheRead|k) = $\(.lastTurn.usd); average $\(.avgTurnUsdLastHour) per turn over the last hour (\(.perHour.turns) turns, $\(.perHour.usd))" else empty end),
+    "  context: \(.context.tokens|k)\(if .context.compactAt then " / auto-compact at \(.context.compactAt|k) (\(.context.pct)%)" else " (auto-compact off)" end); each turn re-reads it, about $\(.context.rereadUsdPerTurn)\(if (.context.pct // 0) >= 80 then "  NEAR COMPACTION" else "" end)",
+    "  compactions: \(.compactions.count)\(if .compactions.last then ", last \(.compactions.last.pre|k) to \(.compactions.last.post|k)" else "" end)"),
   (.agents[] |
     "\(.name) [\(.id)] \(.state)" + (if .activity then " (\(.activity.phase)\(if .activity.tool != "" then " "+.activity.tool else "" end), \(.activity.seconds)s)" else "" end),
     "  task: \(.task[0:140])",

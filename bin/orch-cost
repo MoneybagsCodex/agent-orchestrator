@@ -11,3 +11,8 @@ jq -r '
   (.byFeature | to_entries | sort_by(-.value.usd)[] | "  \(.key|.+"                  "|.[0:18])  $\(.value.usd)  \((.value.share*100)|floor)%  \(.value.calls) calls  last hour $\(.value.usdLastHour)" + (if .value.hourlyBudgetUsd then " of $\(.value.hourlyBudgetUsd)/h" else "" end) + (if .value.skippedForBudget>0 then "  PAUSED \(.value.skippedForBudget)x" else "" end)),
   "",
   (if (.warnings|length)==0 then "No warnings." else (.warnings[] | "! " + .) end)' <<<"$j"
+o=$(curl -sf "$ORCH/orchestrator/tokens") && jq -r '
+  def k: if . >= 1000000 then "\((./100000|round)/10)M" elif . >= 1000 then "\((./1000)|round)k" else "\(.)" end;
+  "",
+  "Me, live: in \(.cumulative.input|k), out \(.cumulative.output|k), cache read \(.cumulative.cacheRead|k) over \(.turns) turns ($\(.cumulative.usd)); \(.perHour.tokens|k)/hr, $\(.perHour.usd) in the last hour",
+  "Context \(.context.tokens|k)\(if .context.compactAt then " of \(.context.compactAt|k) auto-compact line (\(.context.pct)%)" else " (auto-compact off)" end); \(.compactions.count) compactions"' <<<"$o"

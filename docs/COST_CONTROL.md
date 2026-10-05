@@ -65,3 +65,13 @@ This is not in the usage log, so it was measured from its transcript (958 respon
 - Chat is not capped. A model switch is not blocked.
 - Output-length limits on summaries rely on the prompt wording; the CLI has no token cap flag.
 - The throttle and budgets use the log's own costs, so they are only as good as the price table above.
+
+## Auto-compaction and live token visibility
+
+**Auto-compaction.** The host (`src/host.ts`) tracks the real context size: the input plus cache tokens of the latest model call (a logged turn sums every call in it, so it overstates). When a turn ends, the orchestrator is idle and the context is at or over `contextCompactTokens` (default 150000, `POST /costs/budgets`; 0 turns it off), the host writes `/compact` to the session itself. Guards: never mid-turn, never twice in 10 minutes (a summary still over the line would otherwise loop), the flag clears if the compact fails. The CLI's `compact_boundary` event gives before and after sizes, which are saved to `compactions.json`, shown as a notice in the chat, and logged as an estimated `orchestrator-compact` cost row (the `/compact` result itself reports no usage). Measured live: 168k to 3k tokens in 48 s, about $0.03. `POST /orchestrator/compact` (and the dashboard button) does it on demand.
+
+`--disable-slash-commands` was removed from the headless process: with it the session answers "/compact isn't available". The model still has no Skill tool.
+
+**Visibility.** `GET /orchestrator/tokens` (also `orchestrator` inside `/status` and `/overview`): cumulative input, output, cache read and dollars; the last turn; tokens and dollars in the last hour; average dollars per turn; context against the compact line with the dollar cost of re-reading it each turn; compaction count and last before/after. Shown as the "Orchestrator (me)" card in the dashboard, at the top of `orch-overview`, and in `orch-cost`. Cost questions, and any turn taken at 80% or more of the line, get a one-line `[self: ...]` status put in front of the message, so the orchestrator reads its own live numbers rather than guessing.
+
+Limits: dollar figures assume Haiku 4.5 rates unless the model is priced; a restart shows the last known size until the first reply; a turn's "tokens" sums its calls, so per-turn cache read is higher than the context.

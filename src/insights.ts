@@ -281,18 +281,18 @@ export const estimateUsd = (r: { input: number; output: number; cacheRead: numbe
   return (r.input * p.in + r.output * p.out + r.cacheRead * p.cacheRead + r.cacheWrite * p.cacheWrite) / 1e6;
 };
 
-export interface Budgets { hourlyUsd: Record<string, number>; chatHourlyUsd: number; dailyUsd: number; contextWarnTokens: number }
+export interface Budgets { hourlyUsd: Record<string, number>; chatHourlyUsd: number; dailyUsd: number; contextWarnTokens: number; contextCompactTokens: number }
 const BUDGETS_FILE = path.join(ORCH_DIR, 'budgets.json');
 // Background summaries are hard-capped (they are optional: when capped, the last summary stays on screen). The chat is never blocked, only warned about.
-const DEFAULT_BUDGETS: Budgets = { hourlyUsd: { 'decide-issues': 0.30, 'working-on': 0.10, 'finished-outcome': 0.10, 'done-ledger': 0.20 }, chatHourlyUsd: 1.5, dailyUsd: 12, contextWarnTokens: 200000 };
+const DEFAULT_BUDGETS: Budgets = { hourlyUsd: { 'decide-issues': 0.30, 'working-on': 0.10, 'finished-outcome': 0.10, 'done-ledger': 0.20 }, chatHourlyUsd: 1.5, dailyUsd: 12, contextWarnTokens: 200000, contextCompactTokens: 150000 };
 export function readBudgets(): Budgets {
   const j = readJson<any>(BUDGETS_FILE, {});
-  return { hourlyUsd: { ...DEFAULT_BUDGETS.hourlyUsd, ...(j.hourlyUsd ?? {}) }, chatHourlyUsd: j.chatHourlyUsd ?? DEFAULT_BUDGETS.chatHourlyUsd, dailyUsd: j.dailyUsd ?? DEFAULT_BUDGETS.dailyUsd, contextWarnTokens: j.contextWarnTokens ?? DEFAULT_BUDGETS.contextWarnTokens };
+  return { hourlyUsd: { ...DEFAULT_BUDGETS.hourlyUsd, ...(j.hourlyUsd ?? {}) }, chatHourlyUsd: j.chatHourlyUsd ?? DEFAULT_BUDGETS.chatHourlyUsd, dailyUsd: j.dailyUsd ?? DEFAULT_BUDGETS.dailyUsd, contextWarnTokens: j.contextWarnTokens ?? DEFAULT_BUDGETS.contextWarnTokens, contextCompactTokens: j.contextCompactTokens ?? DEFAULT_BUDGETS.contextCompactTokens };
 }
 export function setBudgets(patch: any): Budgets {
   const cur = readBudgets(), num = (v: any) => (typeof v === 'number' && isFinite(v) && v >= 0 ? v : undefined);
   if (patch?.hourlyUsd && typeof patch.hourlyUsd === 'object') for (const [k, v] of Object.entries(patch.hourlyUsd)) if (num(v) !== undefined) cur.hourlyUsd[k] = v as number;
-  for (const k of ['chatHourlyUsd', 'dailyUsd', 'contextWarnTokens'] as const) if (num(patch?.[k]) !== undefined) cur[k] = patch[k];
+  for (const k of ['chatHourlyUsd', 'dailyUsd', 'contextWarnTokens', 'contextCompactTokens'] as const) if (num(patch?.[k]) !== undefined) cur[k] = patch[k];
   try { fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(BUDGETS_FILE, JSON.stringify(cur, null, 2)); } catch { /* best effort */ }
   return cur;
 }
@@ -306,6 +306,7 @@ const costOf = (r: UsageRow) => (r.feature === 'orchestrator-chat' ? estimateUsd
 
 export function logUsage(feature: string, j: any, model?: string) {
   const u = j?.usage ?? {};
+  if (feature === 'orchestrator-chat' && !u.input_tokens && !u.output_tokens && !u.cache_read_input_tokens && !u.cache_creation_input_tokens) return;   // the /compact result: nothing to count (its cost is logged from the compaction event)
   const row: UsageRow = { at: Math.floor(Date.now() / 1000), feature, input: u.input_tokens ?? 0, output: u.output_tokens ?? 0,
     cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0, usd: j?.total_cost_usd ?? 0, model, ms: j?.duration_ms ?? 0 };
   if (feature === 'orchestrator-chat') { row.usdReported = row.usd; row.usd = estimateUsd(row, model); }
@@ -324,6 +325,34 @@ export function budgetBlocked(feature: string): boolean {
   return true;
 }
 
+/** The orchestrator's own token burn, live: cumulative, last turn, rate, context vs the auto-compact line, compactions. Same shape for the dashboard, orch-overview and the model. */
+export function orchSelf() {
+  const rows = loadRows().filter((r) => r.feature === 'orchestrator-chat'), now = Date.now() / 1000, B = readBudgets(), h = deps?.host;
+  const tot = (rs: UsageRow[]) => rs.reduce((t, r) => ({ input: t.input + r.input + r.cacheWrite, output: t.output + r.output, cacheRead: t.cacheRead + r.cacheRead, usd: t.usd + costOf(r) }), { input: 0, output: 0, cacheRead: 0, usd: 0 });
+  const cum = tot(rows), hr = tot(rows.filter((r) => now - r.at < 3600)), last = rows[rows.length - 1];
+  const comp = (h?.compactions ?? []) as { at: number; pre: number; post: number; trigger: string }[], lastC = comp[comp.length - 1];
+  const sinceC = tot(rows.filter((r) => !lastC || r.at > lastC.at));
+  const ctx = h?.ctxTokens || (lastC && (!last || lastC.at >= last.at) ? lastC.post : last ? last.input + last.cacheRead + last.cacheWrite : 0), at = B.contextCompactTokens;   // after a restart the host knows nothing until its first reply
+  const total = (t: { input: number; output: number; cacheRead: number }) => t.input + t.output + t.cacheRead;
+  const lastTurn = last ? { input: last.input + last.cacheWrite, output: last.output, cacheRead: last.cacheRead, usd: +costOf(last).toFixed(4), at: last.at } : null;
+  const perTurnUsd = hr.usd && rows.filter((r) => now - r.at < 3600).length ? hr.usd / rows.filter((r) => now - r.at < 3600).length : 0;
+  return {
+    turns: rows.length, model: h?.model ?? null, busy: !!h?.busy, compacting: !!h?.compacting,
+    cumulative: { ...cum, total: total(cum), usd: +cum.usd.toFixed(4), sinceCompaction: { ...sinceC, total: total(sinceC), usd: +sinceC.usd.toFixed(4) } },
+    lastTurn: lastTurn && { ...lastTurn, total: lastTurn.input + lastTurn.output + lastTurn.cacheRead },
+    perHour: { tokens: total(hr), usd: +hr.usd.toFixed(4), turns: rows.filter((r) => now - r.at < 3600).length }, avgTurnUsdLastHour: +perTurnUsd.toFixed(4),
+    context: { tokens: ctx, compactAt: at, pct: at ? Math.round((ctx / at) * 100) : null, rereadUsdPerTurn: +estimateUsd({ input: 0, output: 0, cacheRead: ctx, cacheWrite: 0 }, h?.model).toFixed(4) },
+    compactions: { count: comp.length, last: lastC ?? null, autoOn: at > 0 },
+    pricedModel: !!(h?.model && PRICE[h.model]),
+  };
+}
+
+/** One line the model (or a human) can read: used in front of cost questions and when the context is close to the compaction line. */
+export function orchSelfLine(): string {
+  const o = orchSelf(), k = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+  return `[self: context ${k(o.context.tokens)}${o.context.compactAt ? ` of ${k(o.context.compactAt)} auto-compact line (${o.context.pct}%)` : ''}; last turn ${o.lastTurn ? `${k(o.lastTurn.total)} tokens, $${o.lastTurn.usd}` : 'none yet'}; ${o.perHour.turns} turns and $${o.perHour.usd} in the last hour; $${o.cumulative.usd} total over ${o.turns} turns; ${o.compactions.count} compactions]`;
+}
+
 export function costsSummary() {
   const rows = loadRows(), now = Date.now() / 1000, B = readBudgets();
   const by: Record<string, any> = {};
@@ -336,7 +365,7 @@ export function costsSummary() {
   for (const [f, b] of Object.entries(by) as [string, any][]) { b.tokensPerCall = b.calls ? Math.round((b.input + b.output + b.cacheRead + b.cacheWrite) / b.calls) : 0; b.share = total ? +(b.usd / total).toFixed(3) : 0; b.hourlyBudgetUsd = B.hourlyUsd[f] ?? null; b.skippedForBudget = skipped[f] ?? 0; b.usd = +b.usd.toFixed(4); b.usdLastHour = +b.usdLastHour.toFixed(4); }
   // How the orchestrator itself is doing: its context is re-read on every turn, and every restart writes it into the cache again.
   const chat = rows.filter((r) => r.feature === 'orchestrator-chat'), last = chat[chat.length - 1];
-  const contextTokens = last ? last.input + last.cacheRead + last.cacheWrite : 0;
+  const contextTokens = orchSelf().context.tokens;   // the host sees each model call; a logged turn sums all its calls
   const hourUsd = spentSince(null, now - 3600), dayUsd = spentSince(null, now - 86400), chatHour = spentSince('orchestrator-chat', now - 3600);
   const restarts24h = chat.filter((r) => now - r.at < 86400 && r.cacheWrite > 100000 && r.cacheRead < 30000).length;
   const warnings: string[] = [];
@@ -754,5 +783,11 @@ async function watch() {
 export function startInsights(d: Deps) {
   deps = d;
   d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e, d.host.model));
+  // A compaction is a model call too (it reads the whole conversation and writes the summary) but its result reports no usage, so log an estimate.
+  d.host.on('compacted', (c: any) => {
+    const row: UsageRow = { at: c.at, feature: 'orchestrator-compact', input: 0, output: c.post, cacheRead: c.pre, cacheWrite: 0, usd: 0, model: d.host.model, ms: c.ms };
+    row.usd = estimateUsd(row, d.host.model); loadRows().push(row);
+    try { fs.appendFileSync(USAGE_LOG, JSON.stringify(row) + '\n'); } catch { /* best effort */ }
+  });
   setInterval(watch, 5000);
 }
