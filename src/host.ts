@@ -66,7 +66,7 @@ export class OrchestratorHost extends EventEmitter {
   private proc: ChildProcess | null = null;
   private opts: HostOptions;
   private active = 0;                   // commands in flight (user turns and peer-triggered turns)
-  private seq = 0;
+  private seq = Date.now();             // never restarts from a low number: an open page that remembers a higher seq would otherwise wait forever after a server restart
   private ring: SeqEvent[] = [];
   private pendingSends = new Map<string, { to: string; text: string }>();
   private restarting = false;
