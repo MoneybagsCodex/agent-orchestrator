@@ -7,6 +7,8 @@
 #   orch-plan set <plan> '<json>'                    replace a plan's steps: {"nodes":[{"id","title","deps","status","sid"}]}
 #   orch-plan node [plan/]<id> <status> [note]       status: todo|active|done|blocked|decide
 #   orch-plan owner [plan/]<id> <agent-id|none>      assign a step to an agent
+#   orch-plan group [plan/]<id> <sub-plan> [milestone]   place a step in a sub-plan (layer) and milestone (oct-04, future ...)
+#   orch-plan layout <plan> '<json>'                 define sub-plans and milestones: {"subplans":[{id,title,blurb}],"milestones":[{id,title}]}
 #   orch-plan assign <agent-id> <plan|none>          route an agent: its "Step N:" tasks land in that plan
 #   orch-plan clear <plan>                           delete a plan
 ORCH="${ORCH_URL:-http://localhost:3003}"
@@ -26,6 +28,11 @@ case "$1" in
   owner) [[ -z "$2" ]] && { echo "usage: orch-plan owner [plan/]<id> <agent-id|none>"; exit 1; }
        split_ref "$2"; sid="$3"; [[ "$sid" == none ]] && sid=""
        post /plan/node "$(jq -n --arg p "$P" --arg id "$N" --arg s "$sid" '{id:$id,sid:$s} + (if $p!="" then {plan:$p} else {} end)')" ;;
+  group) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan group [plan/]<id> <sub-plan|none> [milestone]"; exit 1; }
+       split_ref "$2"; sb="$3"; [[ "$sb" == none ]] && sb=""
+       post /plan/node "$(jq -n --arg p "$P" --arg id "$N" --arg s "$sb" --arg m "$4" '{id:$id,sub:$s} + (if $m!="" then {milestone:$m} else {} end) + (if $p!="" then {plan:$p} else {} end)')" ;;
+  layout) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan layout <plan> '<json>'"; exit 1; }
+       post /plan/layout "$(jq -c --arg p "$2" '. + {plan:$p}' <<<"$3")" ;;
   assign) [[ -z "$2" || -z "$3" ]] && { echo "usage: orch-plan assign <agent-id> <plan|none>"; exit 1; }
        post /routing "$(jq -n --arg a "$2" --arg p "$3" '{agent:$a,plan:$p}')" ;;
   comments) [[ -z "$2" ]] && { echo "usage: orch-plan comments <plan>"; exit 1; }

@@ -396,7 +396,8 @@ async function registerStep(target: { sid?: string; to?: string }, text: string)
   else {
     if (plan.nodes.length >= 40) return `plan ${planId} is full (40 steps)`;
     const prev = plan.nodes.filter((n: any) => n.sid === owner && typeof n.step === 'number' && n.step < step.n).sort((x: any, y: any) => y.step - x.step)[0];
-    plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, step: step.n, statusAt: nowS, startedAt: nowS, createdAt: nowS });
+    const inherit = prev?.sub ?? plan.nodes.filter((n: any) => n.sid === owner && n.sub).pop()?.sub;
+    plan.nodes.push({ id, title: step.title, deps: prev ? [prev.id] : [], status: 'active', sid: owner, sub: inherit, step: step.n, statusAt: nowS, startedAt: nowS, createdAt: nowS });
   }
   plan.updatedAt = nowS; writePlan(plan);
   return `${existing ? 'updated' : 'added'} step ${id} in plan ${planId}: ${step.title}`;
@@ -432,7 +433,7 @@ function planDetected(owner: string, planId: string, found: Detected[], dry: boo
     let k = plan.nodes.filter((n: any) => n.sid === owner && n.auto).length + 1, id = `${owner}-a${k}`;
     while (plan.nodes.some((n: any) => n.id === id)) id = `${owner}-a${++k}`;
     added.push(`${id}: ${d.title}${prev ? ` (after ${prev.id})` : ''}`);
-    plan.nodes.push({ id, title: d.title, deps: prev ? [prev.id] : [], status: 'todo', sid: owner, auto: true, statusAt: nowS, createdAt: nowS });   // in memory even on a dry run, so ids and chaining match what a real run would write
+    plan.nodes.push({ id, title: d.title, deps: prev ? [prev.id] : [], status: 'todo', sid: owner, auto: true, sub: prev?.sub, milestone: 'future', statusAt: nowS, createdAt: nowS });   // in memory even on a dry run, so ids and chaining match what a real run would write
     recent.push(nowS);
   }
   if (!dry && added.length) { plan.updatedAt = nowS; writePlan(plan); if (state) state.recent[owner] = recent; }
@@ -541,7 +542,8 @@ app.post('/plan', (req, res) => {
     ids.add(id);
     clean.push({ id, title: String(n.title ?? id).slice(0, 120), deps: Array.isArray(n.deps) ? n.deps.map(String) : [],
       status: PLAN_STATUS.includes(n.status) ? n.status : 'todo', sid: n.sid ? String(n.sid) : undefined, worker: n.worker ? String(n.worker).slice(0, 40) : undefined,
-      step: typeof n.step === 'number' ? n.step : undefined, parent: n.parent ? String(n.parent).slice(0, 40) : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined });
+      step: typeof n.step === 'number' ? n.step : undefined, parent: n.parent ? String(n.parent).slice(0, 40) : undefined, note: n.note ? String(n.note).slice(0, 300) : undefined,
+      sub: n.sub ? String(n.sub).slice(0, 30) : undefined, milestone: n.milestone ? String(n.milestone).slice(0, 20) : undefined, retro: n.retro ? true : undefined, auto: n.auto ? true : undefined, autoDone: n.autoDone ? true : undefined });
   }
   for (const n of clean) {
     if (n.parent && (!ids.has(n.parent) || n.parent === n.id)) return res.status(400).json({ error: `node ${n.id} has unknown parent: ${n.parent}` });
@@ -550,8 +552,8 @@ app.post('/plan', (req, res) => {
   }
   // Keep each step's timeline: when its status last changed, carried over if the step and status are unchanged.
   const nowS = Date.now() / 1000;
-  for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); n.createdAt = o?.createdAt ?? (o ? undefined : nowS); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
-  writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, comments: existing?.comments, nodes: clean, updatedAt: nowS });
+  for (const n of clean) { const o = existing?.nodes?.find((x: any) => x.id === n.id); for (const k of ['sub', 'milestone', 'retro', 'auto', 'autoDone']) if (n[k] === undefined && o?.[k] !== undefined) n[k] = o[k]; n.createdAt = o?.createdAt ?? (o ? undefined : nowS); n.statusAt = o && o.status === n.status && o.statusAt ? o.statusAt : nowS; if (n.status === 'active') n.startedAt = o?.startedAt ?? nowS; if (n.status === 'done') { n.startedAt = o?.startedAt; n.doneAt = o?.doneAt ?? nowS; } }
+  writePlan({ id: planId, title: String(title ?? existing?.title ?? planId).slice(0, 120), domain: existing?.domain ?? '', order: existing?.order ?? listPlans().length + 1, comments: existing?.comments, subplans: existing?.subplans, milestones: existing?.milestones, nodes: clean, updatedAt: nowS });
   res.json({ ok: true, plan: planId, nodes: clean.length });
 });
 app.post('/plan/node', (req, res) => {
@@ -564,8 +566,19 @@ app.post('/plan/node', (req, res) => {
   }
   if (status !== undefined) { if (!PLAN_STATUS.includes(status)) return res.status(400).json({ error: `status must be one of ${PLAN_STATUS.join(', ')}` }); if (n.status !== status) { n.status = status; n.statusAt = Date.now() / 1000; if (status === 'active' && !n.startedAt) n.startedAt = n.statusAt; if (status === 'done') n.doneAt = n.statusAt; else delete n.doneAt; } }
   if (note !== undefined) n.note = String(note).slice(0, 300);
+  if (req.body?.sub !== undefined) { const sb = String(req.body.sub); if (sb && p.subplans && !p.subplans.some((x: any) => x.id === sb)) return res.status(400).json({ error: `no sub-plan "${sb}" in ${p.id} (sub-plans: ${(p.subplans ?? []).map((x: any) => x.id).join(', ') || 'none'})` }); n.sub = sb || undefined; }
+  if (req.body?.milestone !== undefined) { const ms = String(req.body.milestone); if (ms && !/^[a-z0-9-]{1,20}$/.test(ms)) return res.status(400).json({ error: 'milestone: lowercase letters, digits, dashes (e.g. oct-04, future)' }); n.milestone = ms || undefined; }
   if (sid !== undefined) n.sid = sid ? String(sid).slice(0, 40) : undefined;   // owner agent: session id prefix, empty clears
   p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true, plan: p.id });
+});
+/** POST /plan/layout {plan, subplans:[{id,title,blurb}], milestones:[{id,title}]} — how the dashboard groups a plan: sub-plans (layers) crossed with milestones (dates, then future).
+ *  Steps carry `sub` and `milestone`; a step with neither is placed by inheritance (its dependency's sub-plan) and by date. */
+app.post('/plan/layout', (req, res) => {
+  const p = readPlan(String(req.body?.plan ?? '')); if (!p) return res.status(404).json({ error: `no plan "${req.body?.plan}" (plans: ${planIdsHint()})` });
+  const ok = (a: any, n: number) => Array.isArray(a) && a.length >= 1 && a.length <= n && a.every((x: any) => /^[a-z0-9-]{1,20}$/.test(String(x?.id ?? '')) && String(x?.title ?? '').trim());
+  if (req.body?.subplans !== undefined) { if (!ok(req.body.subplans, 8)) return res.status(400).json({ error: 'subplans: 1-8 items of {id (lowercase, digits, dashes), title, blurb?}' }); p.subplans = req.body.subplans.map((x: any) => ({ id: String(x.id), title: String(x.title).slice(0, 40), blurb: x.blurb ? String(x.blurb).slice(0, 160) : undefined })); }
+  if (req.body?.milestones !== undefined) { if (!ok(req.body.milestones, 12)) return res.status(400).json({ error: 'milestones: 1-12 items of {id, title}' }); p.milestones = req.body.milestones.map((x: any) => ({ id: String(x.id), title: String(x.title).slice(0, 20) })); }
+  p.updatedAt = Date.now() / 1000; writePlan(p); res.json({ ok: true, plan: p.id, subplans: (p.subplans ?? []).length, milestones: (p.milestones ?? []).length });
 });
 app.delete('/plan', (req, res) => { const id = String(req.query.plan ?? ''); if (!readPlan(id)) return res.status(404).json({ error: `no plan "${id}"` }); fs.unlinkSync(planFile(id)); res.json({ ok: true }); });
 
@@ -662,7 +675,7 @@ app.post('/workers', (req, res) => {
     if (!plan) return res.status(400).json({ error: `stepTitle needs plan: which plan does this worker belong to? (plans: ${planIdsHint()})` });
     if (b.parent && !plan.nodes.some((n: any) => n.id === b.parent)) return res.status(400).json({ error: `parent step "${b.parent}" is not in plan ${plan.id}` });
     if (plan.nodes.length >= 40) return res.status(400).json({ error: `plan ${plan.id} is full (40 steps)` });
-    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, createdAt: nowS, parent: b.parent ? String(b.parent).slice(0, 40) : undefined, statusAt: nowS, startedAt: nowS };
+    node = { id: `w-${id}`.slice(0, 40), title: String(b.stepTitle).slice(0, 120), deps: Array.isArray(b.deps) ? b.deps.map(String) : [], status: STEP_OF[w.status], worker: id, createdAt: nowS, sub: plan.nodes.find((n: any) => n.id === b.parent)?.sub, parent: b.parent ? String(b.parent).slice(0, 40) : undefined, statusAt: nowS, startedAt: nowS };
     plan.nodes.push(node);
   }
   if (node && b.status !== undefined && node.status !== STEP_OF[w.status]) {

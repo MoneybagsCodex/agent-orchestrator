@@ -203,3 +203,19 @@ When a routed agent reports finishing work, the same 20 s scanner (section 8) ma
 `POST /plan/detect` also reports `completion` and what it would close (`closed`); add `"apply":true` to really close it. `POST /plan/auto-config {"enabled":false}` turns off both detectors. Closing is undone like any step change: `orch-plan node <plan>/<id> active`.
 
 **Known limit:** it trusts the agent's wording, the same as numbered steps did before. An agent that says "done" about only part of a step will close it early; weak phrases while working are held, but a strong phrase ("shipped") about a sub-part is not.
+
+## 10. Sub-plans and milestones (grouping inside one plan)
+
+A large plan can be grouped for reading without being split into separate plans. The `orchestrator` plan has three **sub-plans** (layers) and three **milestones** (dates): Foundation, Dashboard and Auto-Planning, each shown as bands for Oct 3, Oct 4 and Future.
+
+**Why grouping and not separate plan files:** routing maps an agent to one plan, and the auto-planner, `Step N:` registration, completion detection and the burndown all work on that one file. Splitting it would break dependencies that cross layers. Grouping changes only how the dashboard draws it.
+
+**Data:** `plan.subplans` (`id`, `title`, `blurb`), `plan.milestones` (`id`, `title`), and per step `sub` and `milestone`. A step with no `sub` takes its first dependency's sub-plan, else shows under "Ungrouped". A step with no `milestone` is placed by its start date (`oct-05` style, added after the listed ones), or in `future` if it is `todo` and never started. New steps inherit the sub-plan of the step they chain after (auto-planned `todo` steps also get `milestone: future`; subagent steps take their parent's).
+
+```
+orch-plan layout <plan> '{"subplans":[{"id":"foundation","title":"Foundation","blurb":"..."}],"milestones":[{"id":"oct-03","title":"Oct 3"},{"id":"future","title":"Future"}]}'
+orch-plan group [plan/]<id> <sub-plan|none> [milestone]
+POST /plan/layout   POST /plan/node {sub, milestone}
+```
+
+**Dashboard:** one section per sub-plan with its own progress bar, collapsible, and a dependency graph split into milestone bands. Dependencies that point into another sub-plan are kept in the data but not drawn. A sub-agent step whose parent sits in a different sub-plan is drawn as a top-level step.
