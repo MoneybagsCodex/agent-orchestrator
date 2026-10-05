@@ -167,9 +167,9 @@ const headlineQueued = new Set<string>();
 function headlineFor(sid: string, asked: string[], said: string): string | null {
   if (!asked.length) return null;
   const key = `${sid}|goal|${createHash('sha1').update(asked.join('\n')).digest('hex').slice(0, 12)}`;
-  if (headlines[key]) return headlines[key];
+  if (headlines[key]) { latest[streamOf(key)] = key; return headlines[key]; }
   queueSummary(key, `Below are the most recent requests a person made to a coding agent, oldest first. In ONE short line (at most 14 words) say what the agent is working toward right now, as a goal that starts with a verb like "Adding", "Fixing", "Designing", "Deciding". Weight the most recent request most, and use earlier ones only to understand what it refers to. Do not quote them. Output only that line, nothing else.\n\n${asked.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n')}`);
-  return null;
+  return staleFor(key);
 }
 
 /** What the agent says it just accomplished, in one short past-tense line, from its own final message. */
@@ -190,7 +190,8 @@ function standFor(sid: string, turns: TurnSummary[]): Stand | null {
   const body = recent.map((t, i) => `Exchange ${i + 1}\n  The person asked: ${t.asked.slice(0, 220)}\n  The agent's final message: ${(t.saidLong || t.said || '(no text reply)').slice(0, 700)}${t.errors ? `\n  Tool errors during this exchange (${t.errors}): ${(t.errorDetails ?? []).join(' | ')}` : ''}${t.files.length ? `\n  Files it edited: ${t.files.join(', ')}` : ''}`).join('\n\n');
   const key = `${sid}|stand|${createHash('sha1').update(body).digest('hex').slice(0, 12)}`;
   const hit = headlines[key];
-  if (hit) { try { const j = JSON.parse(hit); return { decisions: j.decisions ?? [], issues: j.issues ?? [], done: j.done ?? [] }; } catch { return null; } }
+  const parse = (t: string | null): Stand | null => { if (!t) return null; try { const j = JSON.parse(t); return { decisions: j.decisions ?? [], issues: j.issues ?? [], done: j.done ?? [] }; } catch { return null; } };
+  if (hit) { latest[streamOf(key)] = key; return parse(hit); }
   queueSummary(key, `You are summarizing where a coding agent's work stands, for a person who supervises several agents. Below are its recent exchanges, oldest first. Reply with ONLY a JSON object, no other text, in exactly this shape: {"decisions":[],"issues":[],"done":[]}
 - decisions: things still waiting on the person to decide or answer, including choices the agent put to them. Max 3, each at most 14 words. Only if still unresolved after the last exchange.
 - issues: problems that are still unresolved after the last exchange: bugs, blockers, errors, things not working yet. Max 3, each at most 14 words. If you mention a tool error, name the tool and say what the error said; never write a vague tool-error line. An error line marked "likely a no-match ... not a real failure" is not a bug: do not list it as an issue. Skip an error that later exchanges show was worked around or fixed.
@@ -198,11 +199,21 @@ function standFor(sid: string, turns: TurnSummary[]): Stand | null {
 Use only what the text says; never guess or add anything. Anything that was fixed or decided in a later exchange must not appear as pending. If a list has nothing, use [].
 
 ${body}`);
-  return null;
+  return parse(staleFor(key));   // the previous summary stays on screen while a new one is throttled or computing
 }
 
+// A summary of an agent that is still working is recomputed at most every few minutes (it changes with every message, and each recompute costs a call);
+// until then the previous summary stays on screen. Capped by the feature's hourly budget as well.
+const latest: Record<string, string> = {}, lastQueued = new Map<string, number>();
+const streamOf = (key: string) => key.split('|').slice(0, 2).join('|');
+const THROTTLE_S: Record<string, number> = { stand: 180, goal: 120 };
+const staleFor = (key: string): string | null => { const k = latest[streamOf(key)]; return (k && headlines[k]) || null; };
 function queueSummary(key: string, prompt: string, apply?: (out: string) => void) {
   if (headlineQueued.has(key)) return;
+  const stream = streamOf(key), kind = key.split('|')[1], now = Date.now() / 1000;
+  if (THROTTLE_S[kind] && staleFor(key) && now - (lastQueued.get(stream) ?? 0) < THROTTLE_S[kind]) return;
+  if (budgetBlocked(featureOf(key))) return;
+  lastQueued.set(stream, now);
   headlineQueued.add(key); headlineQueue.push({ key, prompt, apply }); void runHeadlines();
 }
 
@@ -259,24 +270,84 @@ export function tokensFor(file: string, turnStart: number): TokenStats {
 // ---------------------------------------------------------------- cost tracking
 const USAGE_LOG = path.join(ORCH_DIR, 'usage-log.jsonl');
 const featureOf = (key: string) => key.includes('|ledger2|') ? 'done-ledger' : key.includes('|done|') ? 'finished-outcome' : key.includes('|stand|') ? 'decide-issues' : key.includes('|goal|') ? 'working-on' : 'other';
-export function logUsage(feature: string, j: any) {
+// ---------------------------------------------------------------- cost control
+// Prices in USD per million tokens, only for models whose price is known. Anything else is estimated at these rates and flagged as such.
+const PRICE: Record<string, { in: number; out: number; cacheRead: number; cacheWrite: number }> = {
+  'claude-haiku-4-5-20251001': { in: 1, out: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+};
+const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+export const estimateUsd = (r: { input: number; output: number; cacheRead: number; cacheWrite: number }, model = DEFAULT_MODEL) => {
+  const p = PRICE[model] ?? PRICE[DEFAULT_MODEL];
+  return (r.input * p.in + r.output * p.out + r.cacheRead * p.cacheRead + r.cacheWrite * p.cacheWrite) / 1e6;
+};
+
+export interface Budgets { hourlyUsd: Record<string, number>; chatHourlyUsd: number; dailyUsd: number; contextWarnTokens: number }
+const BUDGETS_FILE = path.join(ORCH_DIR, 'budgets.json');
+// Background summaries are hard-capped (they are optional: when capped, the last summary stays on screen). The chat is never blocked, only warned about.
+const DEFAULT_BUDGETS: Budgets = { hourlyUsd: { 'decide-issues': 0.30, 'working-on': 0.10, 'finished-outcome': 0.10, 'done-ledger': 0.20 }, chatHourlyUsd: 1.5, dailyUsd: 12, contextWarnTokens: 200000 };
+export function readBudgets(): Budgets {
+  const j = readJson<any>(BUDGETS_FILE, {});
+  return { hourlyUsd: { ...DEFAULT_BUDGETS.hourlyUsd, ...(j.hourlyUsd ?? {}) }, chatHourlyUsd: j.chatHourlyUsd ?? DEFAULT_BUDGETS.chatHourlyUsd, dailyUsd: j.dailyUsd ?? DEFAULT_BUDGETS.dailyUsd, contextWarnTokens: j.contextWarnTokens ?? DEFAULT_BUDGETS.contextWarnTokens };
+}
+export function setBudgets(patch: any): Budgets {
+  const cur = readBudgets(), num = (v: any) => (typeof v === 'number' && isFinite(v) && v >= 0 ? v : undefined);
+  if (patch?.hourlyUsd && typeof patch.hourlyUsd === 'object') for (const [k, v] of Object.entries(patch.hourlyUsd)) if (num(v) !== undefined) cur.hourlyUsd[k] = v as number;
+  for (const k of ['chatHourlyUsd', 'dailyUsd', 'contextWarnTokens'] as const) if (num(patch?.[k]) !== undefined) cur[k] = patch[k];
+  try { fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.writeFileSync(BUDGETS_FILE, JSON.stringify(cur, null, 2)); } catch { /* best effort */ }
+  return cur;
+}
+
+interface UsageRow { at: number; feature: string; input: number; output: number; cacheRead: number; cacheWrite: number; usd: number; usdReported?: number; model?: string; ms: number }
+let usageRows: UsageRow[] | null = null;
+const loadRows = (): UsageRow[] => (usageRows ??= (() => { try { return fs.readFileSync(USAGE_LOG, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } })());
+/** What one logged call really cost. The chat's own `total_cost_usd` is the running total of the whole process (and of a resumed session), so adding
+ *  those up counted the same dollars over and over; its cost is estimated from this turn's token counts instead. One-shot summary jobs report a true per-call cost. */
+const costOf = (r: UsageRow) => (r.feature === 'orchestrator-chat' ? estimateUsd(r, r.model) : r.usd);
+
+export function logUsage(feature: string, j: any, model?: string) {
   const u = j?.usage ?? {};
-  const row = { at: Math.floor(Date.now() / 1000), feature, input: u.input_tokens ?? 0, output: u.output_tokens ?? 0,
-    cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0, usd: j?.total_cost_usd ?? 0, ms: j?.duration_ms ?? 0 };
+  const row: UsageRow = { at: Math.floor(Date.now() / 1000), feature, input: u.input_tokens ?? 0, output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0, usd: j?.total_cost_usd ?? 0, model, ms: j?.duration_ms ?? 0 };
+  if (feature === 'orchestrator-chat') { row.usdReported = row.usd; row.usd = estimateUsd(row, model); }
+  loadRows().push(row);
   try { fs.mkdirSync(ORCH_DIR, { recursive: true }); fs.appendFileSync(USAGE_LOG, JSON.stringify(row) + '\n'); } catch { /* best effort */ }
 }
+
+const spentSince = (feature: string | null, since: number) => loadRows().reduce((t, r) => (r.at >= since && (feature === null || r.feature === feature) ? t + costOf(r) : t), 0);
+const skipped: Record<string, number> = {}; const budgetNoted = new Map<string, number>();
+/** True when a background feature has used its hourly budget. The job is skipped (its last summary stays on screen) and counted. */
+export function budgetBlocked(feature: string): boolean {
+  const cap = readBudgets().hourlyUsd[feature]; if (cap === undefined) return false;
+  const spent = spentSince(feature, Date.now() / 1000 - 3600); if (spent < cap) return false;
+  skipped[feature] = (skipped[feature] ?? 0) + 1;
+  if (Date.now() - (budgetNoted.get(feature) ?? 0) > 3600e3) { budgetNoted.set(feature, Date.now()); console.log(`[budget] ${feature} used $${spent.toFixed(3)} of its $${cap}/hour; skipping until the hour rolls over`); }
+  return true;
+}
+
 export function costsSummary() {
-  let rows: any[] = [];
-  try { rows = fs.readFileSync(USAGE_LOG, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }
-  const now = Date.now() / 1000;
+  const rows = loadRows(), now = Date.now() / 1000, B = readBudgets();
   const by: Record<string, any> = {};
   for (const r of rows) {
-    const b = (by[r.feature] ??= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, lastHour: 0 });
-    b.calls++; b.input += r.input; b.output += r.output; b.cacheRead += r.cacheRead; b.cacheWrite += r.cacheWrite; b.usd += r.usd;
-    if (now - r.at < 3600) b.lastHour += r.input + r.output + r.cacheRead + r.cacheWrite;
+    const b = (by[r.feature] ??= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, lastHour: 0, usdLastHour: 0 });
+    b.calls++; b.input += r.input; b.output += r.output; b.cacheRead += r.cacheRead; b.cacheWrite += r.cacheWrite; b.usd += costOf(r);
+    if (now - r.at < 3600) { b.lastHour += r.input + r.output + r.cacheRead + r.cacheWrite; b.usdLastHour += costOf(r); }
   }
-  for (const b of Object.values(by) as any[]) { b.tokensPerCall = b.calls ? Math.round((b.input + b.output + b.cacheRead + b.cacheWrite) / b.calls) : 0; b.usd = +b.usd.toFixed(4); }
-  return { since: rows[0]?.at ?? null, calls: rows.length, byFeature: by };
+  const total = Object.values(by).reduce((t: number, b: any) => t + b.usd, 0);
+  for (const [f, b] of Object.entries(by) as [string, any][]) { b.tokensPerCall = b.calls ? Math.round((b.input + b.output + b.cacheRead + b.cacheWrite) / b.calls) : 0; b.share = total ? +(b.usd / total).toFixed(3) : 0; b.hourlyBudgetUsd = B.hourlyUsd[f] ?? null; b.skippedForBudget = skipped[f] ?? 0; b.usd = +b.usd.toFixed(4); b.usdLastHour = +b.usdLastHour.toFixed(4); }
+  // How the orchestrator itself is doing: its context is re-read on every turn, and every restart writes it into the cache again.
+  const chat = rows.filter((r) => r.feature === 'orchestrator-chat'), last = chat[chat.length - 1];
+  const contextTokens = last ? last.input + last.cacheRead + last.cacheWrite : 0;
+  const hourUsd = spentSince(null, now - 3600), dayUsd = spentSince(null, now - 86400), chatHour = spentSince('orchestrator-chat', now - 3600);
+  const restarts24h = chat.filter((r) => now - r.at < 86400 && r.cacheWrite > 100000 && r.cacheRead < 30000).length;
+  const warnings: string[] = [];
+  if (contextTokens > B.contextWarnTokens) warnings.push(`The orchestrator's own context is ${Math.round(contextTokens / 1000)}k tokens and every turn re-reads it (about $${estimateUsd({ input: 0, output: 0, cacheRead: contextTokens, cacheWrite: 0 }, last?.model).toFixed(3)} per turn before it writes anything). Start a fresh orchestrator session when convenient.`);
+  if (chatHour > B.chatHourlyUsd) warnings.push(`Chat spent $${chatHour.toFixed(2)} in the last hour, over its $${B.chatHourlyUsd} soft budget.`);
+  if (dayUsd > 0.8 * B.dailyUsd) warnings.push(`$${dayUsd.toFixed(2)} spent in 24 hours, ${Math.round((dayUsd / B.dailyUsd) * 100)}% of the $${B.dailyUsd} daily soft budget.`);
+  if (restarts24h >= 3) warnings.push(`${restarts24h} orchestrator restarts in 24 hours; each re-writes the whole context into the cache. Batch server changes into fewer restarts.`);
+  for (const [f, n] of Object.entries(skipped)) if (n) warnings.push(`${f} was paused ${n} time(s) by its hourly budget; its last summary is still shown.`);
+  if (chat.some((r) => r.model && !PRICE[r.model])) warnings.push('Some chat turns ran on a model with no known price; they are estimated at Haiku 4.5 rates, so the real cost is higher.');
+  return { since: rows[0]?.at ?? null, calls: rows.length, totalUsd: +total.toFixed(4), byFeature: by,
+    self: { contextTokens, lastTurnUsd: last ? +costOf(last).toFixed(4) : 0, usdLastHour: +hourUsd.toFixed(4), usdLast24h: +dayUsd.toFixed(4), restarts24h, pricedModels: Object.keys(PRICE) }, budgets: B, warnings };
 }
 
 async function runJob(job: { key: string; prompt: string; apply?: (out: string) => void }) {
@@ -287,7 +358,7 @@ async function runJob(job: { key: string; prompt: string; apply?: (out: string) 
       '--setting-sources', 'project', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json', job.prompt],
       { ...cleanEnv, PWD: '/tmp' }, 90000, '/tmp').then((raw) => {
         // The JSON envelope carries the real token usage; log it per feature, then hand back just the text.
-        try { const j = JSON.parse(raw); logUsage(featureOf(job.key), j); return String(j.result ?? ''); } catch { return raw; }
+        try { const j = JSON.parse(raw); logUsage(featureOf(job.key), j, 'claude-haiku-4-5-20251001'); latest[streamOf(job.key)] = job.key; return String(j.result ?? ''); } catch { return raw; }
       });
     if (job.apply) { job.apply(out); return; }
     let line = out.split('\n').map((l) => l.trim()).find((l) => l && !/^\*\*?tokens/i.test(l) && !l.startsWith('#')) ?? '';
@@ -682,6 +753,6 @@ async function watch() {
 
 export function startInsights(d: Deps) {
   deps = d;
-  d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e));
+  d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e, d.host.model));
   setInterval(watch, 5000);
 }

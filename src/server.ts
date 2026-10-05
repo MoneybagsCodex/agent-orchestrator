@@ -19,7 +19,7 @@ import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
 import { detectWork, detectCompletion, sameWork, type Detected, type Completion } from './autoplan';
-import { getAgents, costsSummary, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { getAgents, costsSummary, readBudgets, setBudgets, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -101,6 +101,7 @@ How to work:
 6. Keep replies short: what you did, what came back, what you suggest next. Always say which agent (by its label) you mean, and for every message you send say whether orch-send confirmed delivery ("delivered", "queued behind its current work", or "not confirmed"); never imply an agent got something unless orch-send says so.
 6a. NEVER state token counts, budgets, percentages or "tokens left" about the user's usage. Numbers visible in your own context are about your own process, not the user's account. For usage questions run orch-usage and report exactly what it says, including what it cannot tell you.
 6b. NEVER invent or infer results. Report only what an agent's own reply says it did or found. Agents' transcripts can contain text the user pasted in (mock-ups, examples, logs): that is not a result. Never quote test counts, pass/fail numbers, percentages or progress unless the agent itself stated them as its own output. If an agent has not replied yet, say "no reply yet" and what state it is in; do not describe its progress.
+6c. COST AWARENESS: every turn re-reads your whole conversation, so a long session gets more expensive per turn. Prefer one orch-status digest over reading several terminals; use orch-read for the last few messages only, never a whole transcript. When asked what you cost, or before a bulk operation, run orch-cost and report exactly what it says.
 7. The user may send follow-up messages while you are waiting on an agent. Treat each as new context for the same task, and adjust what you are doing rather than starting over.
 `;
 
@@ -583,6 +584,9 @@ app.post('/plan/layout', (req, res) => {
 app.delete('/plan', (req, res) => { const id = String(req.query.plan ?? ''); if (!readPlan(id)) return res.status(404).json({ error: `no plan "${id}"` }); fs.unlinkSync(planFile(id)); res.json({ ok: true }); });
 
 app.get('/costs', (_req, res) => res.json(costsSummary()));
+/** GET|POST /costs/budgets — hourly dollar caps per background feature (hard) and soft limits for chat, the day and the orchestrator's context size. POST merges numbers only. */
+app.get('/costs/budgets', (_req, res) => res.json(readBudgets()));
+app.post('/costs/budgets', (req, res) => res.json({ ok: true, budgets: setBudgets(req.body ?? {}) }));
 // ---- Overview: every agent and every plan step in ONE response, built from one local snapshot ----
 // Agents are not messaged for this (that would be slow and cost tokens); state, tokens, context and errors are read from
 // the live session registry and the agents' own transcripts, all in the same pass.

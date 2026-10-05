@@ -1,0 +1,13 @@
+#!/bin/bash
+# What the orchestrator itself costs: spend by feature, its own context size, budgets and warnings.
+# Usage: orch-cost [--json]     Figures for the chat are estimated from token counts (see docs/COST_CONTROL.md).
+ORCH="${ORCH_URL:-http://localhost:3003}"
+j=$(curl -sf "$ORCH/costs") || { echo "orchestrator server not reachable at $ORCH" >&2; exit 1; }
+[[ "$1" == "--json" ]] && { echo "$j"; exit 0; }
+jq -r '
+  "Orchestrator cost (logged since \(.since|strftime("%b %d %H:%M"))): $\(.totalUsd) over \(.calls) calls",
+  "Last hour $\(.self.usdLastHour)   Last 24h $\(.self.usdLast24h)   Own context \((.self.contextTokens/1000|floor))k tokens   Last chat turn $\(.self.lastTurnUsd)",
+  "",
+  (.byFeature | to_entries | sort_by(-.value.usd)[] | "  \(.key|.+"                  "|.[0:18])  $\(.value.usd)  \((.value.share*100)|floor)%  \(.value.calls) calls  last hour $\(.value.usdLastHour)" + (if .value.hourlyBudgetUsd then " of $\(.value.hourlyBudgetUsd)/h" else "" end) + (if .value.skippedForBudget>0 then "  PAUSED \(.value.skippedForBudget)x" else "" end)),
+  "",
+  (if (.warnings|length)==0 then "No warnings." else (.warnings[] | "! " + .) end)' <<<"$j"
