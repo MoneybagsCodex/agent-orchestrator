@@ -775,6 +775,19 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Store orchestrator settings (personality, detail level, theme) to influence response style
+let orchestratorSettings: { personality?: string; detailLevel?: string; theme?: string } = {};
+
+app.post('/settings', (req, res) => {
+  orchestratorSettings = req.body || {};
+  host.sendSystem(`[settings] Personality: ${orchestratorSettings.personality || 'professional'}, Detail: ${orchestratorSettings.detailLevel || 'normal'}`);
+  res.json({ ok: true, settings: orchestratorSettings });
+});
+
+app.get('/settings', (req, res) => {
+  res.json(orchestratorSettings);
+});
+
 app.listen(PORT, () => {
   console.log(`🎯 Orchestrator running on http://localhost:${PORT}`);
   console.log(`   Bridge at ${BRIDGE_URL}`);
