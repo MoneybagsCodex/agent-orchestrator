@@ -719,19 +719,28 @@ The orchestrator coordinates multiple agents across multiple domains. This secti
 ### Current State: Session Discovery
 
 **Session Metadata Storage:**
+
+**[Mac/Linux]**
 - Location: `~/.claude/sessions/`
 - Files: `<port>.json` (metadata) + `<port>.<key>.key` (encryption key)
-- Example metadata:
-  ```json
-  {
-    "pid": 23689,
-    "sessionId": "57341b92-8ded-4d6c-9a99-421b30617ae4",
-    "name": "master-orchestrator",
-    "status": "idle",
-    "startedAt": 1791215368790,
-    "messagingSocketPath": "/tmp/cc-socks/23689.sock"
-  }
-  ```
+- Example path: `/Users/josh/.claude/sessions/23689.json`
+
+**[Windows]**
+- Location: `%USERPROFILE%\.claude\sessions\`
+- Files: `<port>.json` (metadata) + `<port>.<key>.key` (encryption key)
+- Example path: `C:\Users\josh\.claude\sessions\23689.json`
+
+**Metadata Format (Both Platforms):**
+```json
+{
+  "pid": 23689,
+  "sessionId": "57341b92-8ded-4d6c-9a99-421b30617ae4",
+  "name": "master-orchestrator",
+  "status": "idle",
+  "startedAt": 1791215368790,
+  "messagingSocketPath": "/tmp/cc-socks/23689.sock"
+}
+```
 
 **Live Agent Discovery:**
 - `orch_sessions()` (bin/_lib.sh) queries the bridge at `http://localhost:3002/terminals`
@@ -739,9 +748,15 @@ The orchestrator coordinates multiple agents across multiple domains. This secti
 - Falls back to `~/.claude/sessions/` metadata if bridge is unreachable
 - Each agent has: label, topic (conversation title), session ID, PID, peer socket, state
 
+**[Mac/Linux]** — Peer socket is Unix domain socket: `uds:/tmp/cc-socks/23689.sock`
+**[Windows]** — Peer socket may be TCP (older Windows) or UDS (Win 11 22H2+): `tcp://127.0.0.1:12345` or `uds:/tmp/cc-socks/23689.sock`
+
 **Dormant Agent Detection:**
 - Dormant = session metadata exists but process is not running (`pid` doesn't exist)
-- Transcripts remain at `~/.claude/projects/<project-id>/<sessionId>.jsonl`
+
+**[Mac/Linux]** — Transcripts at `~/.claude/projects/<project-id>/<sessionId>.jsonl`
+**[Windows]** — Transcripts at `%USERPROFILE%\.claude\projects\<project-id>\<sessionId>.jsonl`
+
 - Can resume dormant agents via `claude --resume <sessionId>`
 
 ### Resuming Agents by Name
@@ -769,9 +784,13 @@ The orchestrator resumes itself by name:
 ### Spawning New Agents: Recommended Approach
 
 **Programmatic Spawn (Node.js):**
+
+**[Mac/Linux]**
 ```typescript
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import { homedir } from 'os';
+import { writeFileSync } from 'fs';
 
 const agentName = 'game-agent';
 const sessionId = randomUUID();
@@ -785,9 +804,12 @@ const proc = spawn('claude', [
   '--permission-mode', 'dontAsk',
   '--append-system-prompt', agentPrompt,
   '--add-dir', '/path/to/project',
-], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+], { 
+  stdio: ['pipe', 'pipe', 'pipe'], 
+  env: process.env,
+  cwd: process.env.HOME  // Use home directory
+});
 
-// Store metadata for future resume/discovery
 const metadata = {
   name: agentName,
   domain: 'orb-brawl',
@@ -796,7 +818,70 @@ const metadata = {
   prompt: agentPrompt,
   tools: ['Bash', 'ListAgents', 'SendMessage'],
 };
+
+// Register in ~/.claude/session-metadata/<domain>/<name>.json
+writeFileSync(
+  `${homedir()}/.claude/session-metadata/orb-brawl/${agentName}.json`,
+  JSON.stringify(metadata)
+);
 ```
+
+**[Windows]**
+```typescript
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+import { homedir } from 'os';
+import { writeFileSync, mkdirSync } from 'fs';
+import { resolve } from 'path';
+
+const agentName = 'game-agent';
+const sessionId = randomUUID();
+const homeDir = homedir();  // C:\Users\josh
+
+// Ensure Git Bash or WSL is in PATH, or use WSL subprocess
+const shellCmd = 'wsl';  // or 'C:\\Program Files\\Git\\bin\\bash.exe'
+
+const proc = spawn(shellCmd, [
+  'claude',
+  '-p',
+  '--name', agentName,
+  '--session-id', sessionId,
+  '--model', 'claude-haiku-4-5-20251001',
+  '--tools', 'Bash,ListAgents,SendMessage',
+  '--permission-mode', 'dontAsk',
+  '--append-system-prompt', agentPrompt,
+  '--add-dir', resolve('/path/to/project'),
+], { 
+  stdio: ['pipe', 'pipe', 'pipe'], 
+  env: { ...process.env, HOME: homeDir },
+  cwd: homeDir
+});
+
+const metadata = {
+  name: agentName,
+  domain: 'orb-brawl',
+  sessionId,
+  spawnedAt: Date.now(),
+  prompt: agentPrompt,
+  tools: ['Bash', 'ListAgents', 'SendMessage'],
+};
+
+// Register in %USERPROFILE%\.claude\session-metadata\<domain>\<name>.json
+const metaDir = resolve(homeDir, '.claude', 'session-metadata', 'orb-brawl');
+mkdirSync(metaDir, { recursive: true });
+writeFileSync(
+  resolve(metaDir, `${agentName}.json`),
+  JSON.stringify(metadata)
+);
+```
+
+**Platform Notes:**
+- **[Mac/Linux]:** Use `spawn('claude', [...])` directly; PATH includes `/usr/local/bin`
+- **[Windows]:** Must spawn via WSL or Git Bash; `claude` CLI is not a native Windows executable
+  - Option 1: `spawn('wsl', ['claude', ...])` — requires WSL to be installed
+  - Option 2: `spawn('C:\\Program Files\\Git\\bin\\bash.exe', ['-c', 'claude ...'])` — requires Git Bash
+- **[Mac/Linux]** — File paths use `/` and `~` expands to `/Users/username`
+- **[Windows]** — File paths use `\` and `%USERPROFILE%` or `homedir()` returns `C:\Users\username`
 
 **Background Spawn (Recommended for Orchestrator):**
 - Use `--bg` flag: `spawn('claude', [..., '--bg', 'Initial task...'])`
@@ -838,12 +923,77 @@ const metadata = {
 - Command: `orch-deploy-config agents.yaml` — Auto-spawn all agents from config
 - Auto-spawn on orchestrator startup if file exists
 
+### Platform-Specific Environment Setup and Testing
+
+**[Mac/Linux] Setup Checklist:**
+- [ ] `claude` CLI installed and in PATH (`which claude`)
+- [ ] Node 18+ available (`node --version`)
+- [ ] Bash 4+ available (`bash --version`)
+- [ ] Directories writable: `~/.claude/sessions/`, `~/.claude/projects/`, `~/.claude/session-metadata/`
+- [ ] Bridge running on `:3002` (if using operator-cockpit)
+
+**[Mac/Linux] Testing Checklist:**
+- [ ] `orch-sessions` lists live and dormant agents (via bridge or fallback)
+- [ ] `claude -p --name test-agent --session-id <uuid>` spawns and runs
+- [ ] `claude -p --name test-agent --resume <sid>` resumes with full history
+- [ ] Metadata file created at `~/.claude/sessions/<pid>.json`
+- [ ] Peer socket accessible: `ls -la /tmp/cc-socks/`
+- [ ] SendMessage works between orchestrator and spawned agent
+
+**[Windows] Setup Checklist:**
+- [ ] Claude CLI installed (via Node/NPM or standalone)
+- [ ] Git Bash installed (or WSL 2 active)
+- [ ] Node 18+ available (`node --version`)
+- [ ] Directories writable: `%USERPROFILE%\.claude\sessions\`, `%USERPROFILE%\.claude\projects\`, `%USERPROFILE%\.claude\session-metadata\`
+- [ ] PATH includes Git Bash or WSL (`where bash` or `wsl --version`)
+- [ ] If using TCP sockets: Windows 11 22H2+ or WSL fallback
+
+**[Windows] Testing Checklist:**
+- [ ] `wsl orch-sessions` lists agents from WSL environment
+- [ ] `wsl claude -p --name test-agent --session-id <uuid>` spawns via WSL
+- [ ] Session metadata created at `%USERPROFILE%\.claude\sessions\<port>.json`
+- [ ] Peer socket type detected: `uds://` (UDS) or `tcp://` (TCP fallback)
+- [ ] Registry directory created: `%USERPROFILE%\.claude\session-metadata\orb-brawl\`
+- [ ] SendMessage works from orchestrator to spawned agent (via peer socket or TCP bridge)
+
+**[Windows] Known Issues & Workarounds:**
+- **Issue:** Native `claude` command not found
+  - **Workaround:** Use `wsl claude` or `C:\Program Files\Git\bin\bash.exe -c "claude ..."`
+- **Issue:** Unix sockets (`uds://`) don't work on Windows <11 22H2
+  - **Workaround:** Update Windows, or use WSL for agent spawn
+- **Issue:** PATH delimiter is `;` on Windows, `:` on Unix
+  - **Workaround:** Use Node's `path.delimiter` constant in TypeScript code
+- **Issue:** File paths use backslashes; code may expect forward slashes
+  - **Workaround:** Use `path.resolve()` and `path.join()` instead of string concatenation
+
 ### Agent Registry and Lifecycle
 
 **Session Metadata Registry:**
+
+**[Mac/Linux]**
 - Location: `~/.claude/session-metadata/`
 - Structure: `<domain>/<agent-name>.json`
-- Contents: name, domain, sessionId, spawnedAt, prompt, tools, createdBy, status
+- Example: `~/.claude/session-metadata/orb-brawl/game-agent.json`
+
+**[Windows]**
+- Location: `%USERPROFILE%\.claude\session-metadata\`
+- Structure: `<domain>\<agent-name>.json`
+- Example: `C:\Users\josh\.claude\session-metadata\orb-brawl\game-agent.json`
+
+**Registry Contents (Both Platforms):**
+```json
+{
+  "name": "game-agent",
+  "domain": "orb-brawl",
+  "sessionId": "abc123...",
+  "spawnedAt": 1791300957046,
+  "prompt": "You are the game orchestrator...",
+  "tools": ["Bash", "ListAgents", "SendMessage"],
+  "createdBy": "orchestrator-v1",
+  "status": "idle"
+}
+```
+
 - Used for: agent discovery, resume-by-name, lifecycle tracking
 
 **Agent Lifecycle States:**
