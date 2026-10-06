@@ -1475,6 +1475,122 @@ Time T2: Deploy agent unblocks (permission decided)
 
 ---
 
+## 23. Continuous Background Blocker Monitoring (Autonomous Mode)
+
+The orchestrator runs a continuous background loop (even while idle) that automatically manages permissions without user intervention. Safe operations are auto-approved; risky operations escalate to the user.
+
+### How It Works
+
+**Loop Cycle (every 2-3 seconds):**
+1. Run `orch-status` to get current agent states
+2. Detect NEW blockers (agents in BLOCKED state not yet handled)
+3. For each NEW blocker:
+   - Check permission prompt text against orchestrator.config.json whitelist
+   - **If SAFE** (matches git, npm, file write, orch-* patterns): Auto-approve
+   - **If RISKY/UNKNOWN**: Alert user and wait for their decision
+4. Log all actions: approvals, alerts, timeouts
+5. Deduplicate: Track which blockers have been handled (never re-approve same blocker)
+
+### Auto-Approval Workflow
+
+```
+Blocker Detected: git commit
+  ↓
+Check Whitelist: "git commit" → SAFE ✓
+  ↓
+Auto-Approve: orch-send <agent> --key enter
+  ↓
+Report: "✅ Auto-approved: git commit for **code-agent** [a1b2c3]"
+  ↓
+Agent Unblocks: continues with task
+```
+
+### Manual Escalation Workflow
+
+```
+Blocker Detected: Deploy to production
+  ↓
+Check Whitelist: "deploy" → RISKY ✗
+  ↓
+Alert User: SendMessage to master-orchestrator
+  ↓
+User Decides: orch-send <agent> --key y (approve) or --key n (deny)
+  ↓
+Agent Unblocks: based on user decision
+```
+
+### Deduplication Mechanism
+
+**Track by:** Agent name + Session ID (e.g., "code-agent:a1b2c3")
+- When auto-approval sent: mark blocker as handled
+- On next loop cycle: skip already-handled blockers
+- When agent unblocks: clear from tracking (can handle new blockers)
+
+**Result:** Never auto-approve the same blocker twice, even if the agent stalls or loops.
+
+### Logging & Audit Trail
+
+All background actions are logged:
+- `[auto-approved]` Agent: operation (e.g., "[auto-approved] code-agent: git commit")
+- `[escalated]` Agent: permission text (e.g., "[escalated] deploy-agent: Allow prod deploy?")
+- `[timeout]` Agent: blocker has been pending >5 min (e.g., "[timeout] game-agent: No response for 5 min")
+- `[dedup-skip]` Agent: already handled this blocker (e.g., "[dedup-skip] test-agent: Already approved git push")
+
+### Safe Operations (Auto-Approved)
+
+From orchestrator.config.json SAFE_BASH_PATTERNS:
+- `git commit`, `git push`, `git add`, `git merge`, `git rebase`
+- `npm install`, `npm ci`, `npm run`, `npm test`, `npm build`
+- `bash orch-*` (all orchestrator scripts)
+- Standard tools: `jq`, `grep`, `sed`, `cat`, `ls`, `mkdir`, `touch`, `cp`, `mv`
+
+From SAFE_FILE_WRITE_PATTERNS:
+- Writes to `docs/`, `config/`, `test/`, `.log`, `orchestrator-sessions/`
+
+### Risky Operations (Require User Approval)
+
+From orchestrator.config.json RISKY patterns:
+- `rm -rf`, `rm -r`, `delete`, `deploy`, `force-push`
+- `sudo`, `chmod`, `chown`, `curl`, `wget`
+- Any reference to secrets, passwords, tokens, credentials, `.env`
+
+### Benefits
+
+- **Autonomous:** Auto-resolves safe operations without interrupting user
+- **Safe:** Risky operations still require user decision
+- **Continuous:** Runs even while user is idle or away
+- **Non-Blocking:** Runs in background; doesn't prevent user from working
+- **Auditable:** All actions logged for transparency
+- **Smart Dedup:** Never re-approves the same blocker
+- **Cross-Platform:** Works identically on Mac, Linux, Windows
+
+### Failure Modes & Handling
+
+**Blocker Timeout (>5 minutes pending):**
+- Log: `[timeout] agent-name: No response for 5 min`
+- Action: Send escalation alert to user
+- Wait: User must decide (orch-send --key y/n)
+
+**Network Failure in SendMessage:**
+- Log: `[alert-failed] agent-name: SendMessage failed`
+- Action: Continue monitoring; retry on next cycle
+- User sees alert when SendMessage recovers
+
+**Agent Crashes:**
+- Blocker automatically cleared (orch-status no longer shows agent)
+- Next agent that needs approval will be handled normally
+
+### Autonomy Level
+
+This background loop effectively puts the orchestrator in **semi-autonomous mode**:
+- **Routine operations** (git, npm, file writes): Auto-handled ✅
+- **Risky operations** (deploy, sudo, credentials): User-escalated ⚠️
+- **Unknown operations**: User-escalated (safety-first default) ⚠️
+
+Users can disable auto-approval by setting `autoApproval.enabled: false` in orchestrator.config.json.
+
+---
+
 ## Checklist: Is the Orchestrator Working Correctly?
 
 - ✅ Every status report includes all live agents with label, ID, state, summary

@@ -993,11 +993,14 @@ async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
             approvedAt: Date.now(),
           });
 
-          // Log the auto-approval
-          console.log(`[auto-approved] ${alert.agentName}: ${operation}`);
-
-          // TODO: In a real implementation, call orch-send --key y to approve
-          // For now, just log the intent
+          // Send approval command: orch-send <sid> --key y
+          try {
+            const approvalCmd = path.join(deps.binDir, 'orch-send');
+            await run(approvalCmd, [agent.sid.slice(0, 8), '--key', 'y'], env());
+            console.log(`[auto-approved] ${alert.agentName}: ${operation} (approval sent via orch-send)`);
+          } catch (e) {
+            console.error(`[auto-approval-failed] ${alert.agentName}: ${(e as Error).message.slice(0, 120)}`);
+          }
         } else {
           // Risky or unknown operation: require user approval
           const alert: BlockerAlert = {
