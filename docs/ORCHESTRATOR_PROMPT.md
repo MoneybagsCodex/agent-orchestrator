@@ -1189,11 +1189,44 @@ Agents running in locked-down mode (`--permission-mode dontAsk`) will sometimes 
   - "Permission required for [action]"
 - Agent's `waitingFor` field in session metadata is populated
 
-**Proactive Monitoring:**
-- Run `orch-status` every 5-10 seconds to catch new blockers
-- `orch-overview` includes a "Blocked agents" section
-- Dashboard can show blocked agents in red/warning state
-- Send proactive notification: "Agent **name** is waiting on your approval"
+**Proactive Monitoring (Active Implementation Required):**
+
+The orchestrator must actively poll agent status and surface blockers immediately, preventing silent hangs.
+
+**Design Requirement:**
+- Background timer: check `orch-status` every 5-10 seconds (configurable)
+- When a new blocker is detected (agent state changes to BLOCKED), immediately alert
+- Do NOT proceed with new tasks to that agent while blocked
+- Push notification to user: "Agent **name** blocked on: [permission prompt text]"
+
+**Platform Support:**
+- **[Mac/Linux]** and **[Windows]** (identical behavior) — use same monitoring code
+- Both platforms run the same Node.js orchestrator process (`src/host.ts` or `src/server.ts`)
+- Use existing `orch-status` tool; works identically on both platforms
+
+**Implementation Location:**
+- Should be in `src/server.ts` (HTTP event loop) or `src/host.ts` (orchestrator heartbeat)
+- Detect state transitions: store `lastSeenState` per agent, trigger alert on → BLOCKED
+- Do NOT suppress blocker alerts; they are critical
+
+**Alert to User:**
+```
+🚨 **Agent Blocked:** **deploy-agent** is waiting on your approval
+Prompt: "Allow changes to prod schema? (y/n)"
+[rest of orchestrator response...]
+```
+
+**Prevents Silent Hangs:**
+- Without active monitoring: agent gets blocked on permission → orchestrator waits silently forever
+- With active monitoring: detect within 5-10 seconds → alert user immediately → user decides
+- User can then: approve, deny, or cancel the task
+
+**Testing (Both Platforms):**
+- [ ] Create agent, trigger permission prompt
+- [ ] Verify orchestrator alerts within 10 seconds
+- [ ] Verify alert includes exact permission text
+- [ ] Verify agent cannot proceed without user decision
+- [ ] Test on Windows via WSL agent; verify identical behavior
 
 ### Auto-Approve vs. Escalate to User
 
