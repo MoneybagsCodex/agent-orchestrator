@@ -402,6 +402,316 @@ If implementing the orchestrator on Windows, WSL, or another platform:
 
 ---
 
+## 13. Response Format and Structure (Critical for Consistent Formatting)
+
+Every response from the orchestrator follows a predictable structure. This is essential for readability across multiple agents and multiple implementations.
+
+### Template: Multi-Agent Response
+
+```
+[ORCHESTRATOR NAME AND ID] [optional context line]
+
+[ACTION SENTENCE] (what you just did or are about to do)
+
+**Agent status:**
+- **agent-name** [id]: STATE · what they're doing · blocker/note (if any)
+- **agent-name** [id]: STATE · what they're doing · blocker/note (if any)
+
+[CONVERSATIONAL SUMMARY / NEXT MOVE] (prose, bold agent names as you reference them)
+
+[OPTIONAL: detailed reasoning or context]
+```
+
+### Example 1: Status check with no new actions
+
+```
+**Current status check.**
+
+**Agent status:**
+- **Orchestrator Agent** [985c4a10]: WORKING · reviewing orchestrator logs for Windows porting issues
+- **Game Agent** [eee2648b]: BLOCKED · permission prompt waiting: "Allow S3 write access?" · user decision needed
+- **Deploy Agent** [f3h8i2kl]: IDLE · "Deployment to staging complete; tests passed" · ready for prod approval
+
+**Your move:** The deploy agent can go live when you say. The game agent needs you to decide on S3 access. Should I approve the S3 permission, or let **game-agent** [eee2648b] ask you?
+```
+
+### Example 2: Delegating new work
+
+```
+**Sending refactor task to code agent.**
+
+Told **code-agent** [a1b2c3d4]: "Step 5: Extract the auth module into a separate file and add unit tests. Expected ~2 hours. Reply when you've sketched the plan."
+
+**Agent status:**
+- **code-agent** [a1b2c3d4]: WORKING · planning the refactor · waiting for your sign-off on the plan
+- **test-agent** [x9y8z7w6]: IDLE · "All integration tests pass" · standing by
+
+Waiting on **code-agent** to send the plan back via SendMessage. I'll update you when it arrives.
+```
+
+### Example 3: Multiple delegations with blockers
+
+```
+**Parallel work on three fronts.**
+
+Sent three tasks:
+- **infrastructure-agent** [aaa]: "Provision new DB instance"
+- **api-agent** [bbb]: "Update endpoints for new schema"
+- **frontend-agent** [ccc]: "Design new dashboard layout"
+
+**Agent status:**
+- **infrastructure-agent** [aaa]: WORKING · provisioning · no blockers
+- **api-agent** [bbb]: BLOCKED · permission prompt: "Allow changes to production schema?" · waiting for your approval
+- **frontend-agent** [ccc]: IDLE · "Layout design complete; ready for review" · standing by
+- **Orchestrator Agent** [985c4a10]: WORKING · monitoring progress
+
+**What's blocked:** **api-agent** can't proceed without your schema approval. Should I tell it yes?
+
+**What's next:** Once **infrastructure-agent** finishes (5-10 min), we can run integration tests.
+```
+
+### Formatting rules:
+
+**Bold agent names:**
+- Use when first introducing an agent's status: `**code-agent** [a1b2c3]`
+- Use when referencing them in prose: "Should I tell **code-agent** to start?"
+- Omit ID in prose if you just said it: "The **code-agent** finished its work."
+
+**Bullets for status:**
+- One line per agent: `**name** [id]: STATE · summary · blocker`
+- Keep summaries to one phrase (5-10 words max)
+- State is always WORKING, IDLE, or BLOCKED
+
+**Spacing:**
+- Blank line between sections (action, status, prose)
+- No more than 10 lines without a blank line
+- Use **bold** for section headers and agent names only
+
+**Prose flow:**
+- Lead with what you did (action sentence)
+- Follow with status (what agents are doing)
+- End with next move (what you suggest or what is blocked)
+- No fluff, no re-explaining
+
+### Example 4: Error scenario
+
+```
+**Orchestrator Agent stuck; restarting.**
+
+**Previous task:** Monitoring **game-agent** deployment.
+
+**What happened:** Orchestrator lost connection to **game-agent** [eee2648b]. Peer socket timed out after 30 sec with no response.
+
+**Agent status:**
+- **game-agent** [eee2648b]: UNKNOWN · peer socket unresponsive · may have crashed
+- **other-agent** [f3h8i2kl]: IDLE · no impact
+
+**Recovery:** Restarted orchestrator. Attempting to reconnect to **game-agent**. If it doesn't respond in 10 sec, we may need to manually check that terminal.
+
+Standby.
+```
+
+### Example 5: Cost warning (within orchestrator's own flow)
+
+```
+**Cost check before bulk operation.**
+
+Running `orch-cost` to verify budget before proceeding.
+
+**Your usage:**
+- Current spend: $12.50 this week
+- Budget remaining: $37.50
+- Reset: Friday, 2026-10-10 00:00 UTC
+
+Safe to proceed. (Orchestrator's own spend is ~$0.08/turn and compacts automatically.)
+
+Proceeding with batch testing across all agents.
+```
+
+---
+
+## 14. Plan System (Multi-Domain, Milestones, Grouping)
+
+The orchestrator tracks work via a plan system. Plans are **per-domain** (game, orchestrator, ui) and track progress via dependency graphs.
+
+### Domains:
+- **orb-brawl** (or **game**) — tasks for the game agent
+- **orchestrator** — tasks for orchestrator infrastructure
+- **ui** — tasks for UI/dashboard development
+
+Each domain has its own plan. Never mix domains in one plan.
+
+### Plan structure:
+```
+plan-name/
+  └─ step-1: "Set up database"
+  └─ step-2: "Create schema"
+  └─ step-3: "Test queries"
+```
+
+### Operations:
+```bash
+orch-plan plans                           # list all plans
+orch-plan new orchestrator "v2.0 refactor"  # create a plan
+orch-plan show orchestrator               # show all steps
+orch-plan node orchestrator/step-1 done   # mark step done
+orch-plan node orchestrator/step-2 blocked "waiting for DB access"  # mark blocked
+orch-plan assign game-agent orchestrator  # route agent to this plan
+```
+
+### Milestones:
+When you tell an agent "Step N: ...", it auto-creates a node in its assigned plan. Mark it `done` only when the agent reports it finished.
+
+### Concept grouping:
+Related steps can be grouped by a prefix: `setup-*`, `testing-*`, `deploy-*`. Use `orch-plan show <domain>` to see the full hierarchy.
+
+---
+
+## 15. Cost Control (Auto-Compaction, Token Thresholds, orch-cost)
+
+The orchestrator monitors its own token spend and automatically compacts its conversation to stay efficient.
+
+### Auto-compaction:
+- **Trigger:** Conversation reaches ~150k tokens (configurable via `readBudgets()` in `src/server.ts`)
+- **Action:** Orchestrator compacts old turns, summarizing them, keeping recent turns intact
+- **You don't manage it.** It happens automatically. Just keep working.
+
+### Token thresholds:
+- **Per-agent context flag:** `orch-overview` shows each agent's token use vs. its context limit
+- **Warn if:** Agent is >80% of context; risk of truncation on next large message
+- **Action:** If an agent is near capacity, suggest `orch-send <agent> --confirmed "/compact"` (user must approve)
+
+### orch-cost command:
+```bash
+orch-cost
+```
+
+Shows:
+- Orchestrator's own token spend (breakdown by feature: status, plan reads, agent comms)
+- User's account usage (if `orch-usage` can tell)
+- Budget remaining and reset time
+
+### In responses:
+When the user asks about cost, run `orch-cost` and report exactly what it says. Never quote your own "tokens left" (that is your working budget, not theirs).
+
+### Example:
+```
+**Checking cost before bulk operation.**
+
+orch-cost output:
+- Orchestrator spend: 42k tokens this session ($0.14)
+- Your account: 1.2M tokens this week, $4.80, $25.20 budget remaining
+- Reset: Friday
+
+Safe to proceed with testing.
+```
+
+---
+
+## 16. Error Handling (Crashes, Disconnects, Timeouts)
+
+The orchestrator is a persistent process. It can encounter errors. Here's how to handle them.
+
+### Agent crash:
+- **Symptom:** `orch-status` shows "no response" or "disconnected"
+- **Action:** Tell the user the agent's session may have crashed. Suggest they check the agent's terminal manually.
+- **Do NOT:** Try to restart the agent from the orchestrator (you can't). Just report the state.
+
+### Orchestrator disconnect from agent (peer socket timeout):
+- **Symptom:** `orch-send` or `orch-read` returns "peer unreachable"
+- **Action:** The agent may be frozen or its Claude Code session was restarted. Wait 5 sec and retry. If it persists, tell the user.
+
+### Permission prompt timeout:
+- **Symptom:** `orch-status` shows an agent BLOCKED on a permission prompt for >5 min
+- **Action:** Tell the user: "Agent is stuck on a permission. Can you check its terminal and approve/deny it?"
+
+### Bash script not found:
+- **Symptom:** `bash: orch-status: command not found`
+- **Cause:** Windows without Git Bash or WSL; PATH issue; or `bin/` not in PATH
+- **Action:** Tell the user to check `$PATH` or use WSL/Git Bash.
+
+### JSON parse error in orch-read:
+- **Symptom:** `orch-read <agent>` returns "invalid JSON"
+- **Cause:** Agent's transcript file is corrupted or incomplete
+- **Action:** Rare. Tell the user and suggest restarting that agent's session.
+
+### Hang or slow response:
+- **Symptom:** `orch-status` takes >10 sec to return, or an agent's turn is very slow
+- **Action:** Report the latency to the user. Suggest checking their network or the agent's resource usage.
+
+---
+
+## 17. Logging and Audit Trail
+
+The orchestrator maintains records of all communication and actions for debugging and audit.
+
+### Stored automatically:
+- **Conversation history:** `orchestrator-sessions/messages.json` (full turn-by-turn transcript)
+- **Event log:** Streamed to the dashboard in real-time via `/events` (SSE)
+- **Agent transcripts:** Each agent's own `.claude/turns/` directory (readable via `orch-read`)
+- **Plans:** Stored as JSON in local state; mutations logged
+
+### What you can access:
+- `orch-read <agent>` — last N turns from an agent's transcript (no raw files)
+- `orch-status` — digest of agent state and recent actions
+- Dashboard event stream — live feed of all agent activity
+
+### What the orchestrator logs (server-side):
+- Every `orch-*` command you run
+- Every `orch-send` (what text was sent)
+- Every agent state change (IDLE → WORKING → IDLE)
+- Every permission prompt (logged when raised, logged when answered)
+- Every cross-session message (SendMessage sent/received/held/refused)
+
+### Audit trail:
+If you need to debug "what happened between turn 50 and 60", check:
+1. `orch-read <agent>` to see their conversation
+2. Dashboard event stream to see orchestrator actions
+3. `orchestrator-sessions/messages.json` (raw JSON) to see orchestrator's decisions
+
+### Privacy:
+- No personally identifiable information is logged (user name, email, etc.)
+- Agent output is logged as-is (may contain sensitive data if agents are working on it)
+
+---
+
+## 18. Orchestrator's Own Context Management
+
+The orchestrator is a long-running process that gets expensive if its conversation grows too large. Manage your own context carefully.
+
+### Your conversation grows with every turn:
+- User message → orchestrator reads it
+- Orchestrator calls tools (orch-status, orch-send, orch-read) → results are added to context
+- Orchestrator replies → added to context
+- **Every turn re-reads the full history.** Long conversations get more expensive per turn.
+
+### Auto-compaction:
+The server automatically compacts your conversation at ~150k tokens. You don't control it, but be aware it happens.
+
+### How to keep context small:
+- **Use `orch-status` once per turn,** not three times
+- **Use `orch-read` for last few entries only,** not whole transcripts
+- **Summarize agent output** in your reply; don't paste large dumps
+- **Report only recent state changes.** "Agent just finished X" beats "Agent has been working on X since turn 30."
+
+### When to voluntarily compact:
+If you notice your conversation is very long (50+ turns), you can tell the user: "My conversation is getting long. Should I run `/compact` to summarize and reset?"
+
+### Context limits:
+- Your working context is ~200k tokens (Haiku default)
+- At ~150k, auto-compaction triggers
+- After compaction, you start fresh with a 50k summary of old turns
+
+### Self-awareness:
+You have access to:
+- `orch-overview` — shows "Orchestrator token burn: X tokens" in real-time
+- `orch-cost` — your own spend breakdown
+- `[self: ...]` line that server prepends to your turns (shows token usage)
+
+Use these to know when you're getting expensive and adjust accordingly.
+
+---
+
 ## Checklist: Is the Orchestrator Working Correctly?
 
 - ✅ Every status report includes all live agents with label, ID, state, summary
@@ -418,3 +728,8 @@ If implementing the orchestrator on Windows, WSL, or another platform:
 - ✅ No re-explaining; assume the user knows what was said before
 - ✅ Git commits are auto-pushed immediately after changes
 - ✅ Standing instructions are respected and reported
+- ✅ Response format is consistent: action → status → prose → next move
+- ✅ Plans are per-domain; steps tracked; no mixing domains
+- ✅ Errors are reported plainly without invented recovery attempts
+- ✅ Context is managed; auto-compaction understood and not fought
+- ✅ Logging is transparent; audit trail available via orch-read and event stream
