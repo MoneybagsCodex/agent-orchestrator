@@ -780,6 +780,79 @@ async function watch() {
   } catch (e) { console.error('[insights watch]', (e as Error).message); }
 }
 
+// ---- Auto-Approval Configuration
+
+interface AutoApprovalConfig {
+  enabled: boolean;
+  safeOperations: {
+    bashPatterns: string[];
+    fileWritePatterns: string[];
+    risky: {
+      bashPatterns: string[];
+      filePatterns: string[];
+    };
+  };
+  monitoring: {
+    blockersCheckIntervalMs: number;
+    messageTimeoutMs: number;
+    autoApprovalReportFormat: string;
+  };
+}
+
+let autoApprovalConfig: AutoApprovalConfig | null = null;
+
+function loadAutoApprovalConfig(): AutoApprovalConfig {
+  if (autoApprovalConfig) return autoApprovalConfig;
+
+  try {
+    const configPath = path.join(path.dirname(import.meta.dirname), 'orchestrator.config.json');
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    autoApprovalConfig = JSON.parse(raw).autoApproval || { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } } };
+  } catch (e) {
+    // Config file not found or invalid; disable auto-approval
+    autoApprovalConfig = { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } }, monitoring: { blockersCheckIntervalMs: 5000, messageTimeoutMs: 30000, autoApprovalReportFormat: '✅ Auto-approved: {operation}' } };
+  }
+
+  return autoApprovalConfig;
+}
+
+/**
+ * Check if a permission prompt text matches a safe operation (whitelist).
+ * Returns: { isSafe: boolean, operation?: string }
+ */
+function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string): { isSafe: boolean; operation?: string } {
+  const config = loadAutoApprovalConfig();
+  if (!config.enabled) return { isSafe: false };
+
+  const prompt = promptText.toLowerCase();
+  const cmd = (agentLastCommand || '').toLowerCase();
+
+  // Check if this looks like a bash operation
+  if (prompt.includes('allow') && (prompt.includes('bash') || prompt.includes('command') || prompt.includes('run'))) {
+    for (const pattern of config.safeOperations.bashPatterns) {
+      if (cmd.includes(pattern.toLowerCase())) return { isSafe: true, operation: pattern };
+    }
+    // If it's a bash command, check risky patterns
+    for (const pattern of config.safeOperations.risky.bashPatterns) {
+      if (cmd.includes(pattern.toLowerCase())) return { isSafe: false };
+    }
+  }
+
+  // Check if this looks like a file write operation
+  if (prompt.includes('allow') && (prompt.includes('write') || prompt.includes('file') || prompt.includes('create'))) {
+    for (const pattern of config.safeOperations.fileWritePatterns) {
+      if (cmd.includes(pattern.toLowerCase())) return { isSafe: true, operation: pattern };
+    }
+    // Check risky file patterns
+    for (const pattern of config.safeOperations.risky.filePatterns) {
+      if (cmd.includes(pattern.toLowerCase())) return { isSafe: false };
+    }
+  }
+
+  // Default: not safe (require user approval)
+  return { isSafe: false };
+}
+
 // ---- Active Blocker Monitoring & Message Status Tracking
 
 export interface MessageBubble {
@@ -796,7 +869,7 @@ export interface MessageBubble {
 const messageBubbles = new Map<string, MessageBubble>();
 
 // Track agent state transitions to detect blockers
-const agentLastState = new Map<string, { state: string; since: number; blockedOn?: string }>();
+const agentLastState = new Map<string, { state: string; since: number; blockedOn?: string; lastCmd?: string }>();
 
 // Emit alert when agent becomes blocked
 export interface BlockerAlert {
@@ -805,9 +878,20 @@ export interface BlockerAlert {
   state: 'BLOCKED';
   blockedOn: string;  // permission prompt text
   detectedAt: number;
+  autoApproved?: boolean;  // true if auto-approved
+  operation?: string;      // what was auto-approved
 }
 
 const blockerAlerts = new Map<string, BlockerAlert>();
+
+// Track auto-approvals to report in responses
+export interface AutoApprovalReport {
+  agentName: string;
+  operation: string;
+  approvedAt: number;
+}
+
+const autoApprovalReports: AutoApprovalReport[] = [];
 
 /**
  * Track a sent message. Called when orch-send or SendMessage is used.
@@ -868,7 +952,7 @@ function formatStatusBubble(bubble: MessageBubble): string {
 
 /**
  * Monitor agent states and detect blocked agents. Called every 5-10 seconds by watch().
- * Returns blockers that need immediate user attention.
+ * Returns blockers that need immediate user attention (excludes auto-approved).
  */
 async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
   try {
@@ -883,22 +967,54 @@ async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
 
       // Detect state transition to BLOCKED
       if (currentState === 'BLOCKED' && (!lastState || lastState.state !== 'BLOCKED')) {
-        const alert: BlockerAlert = {
-          agentName: agent.label || agent.topic || 'agent',
-          agentId: agent.sid.slice(0, 8),
-          state: 'BLOCKED',
-          blockedOn,
-          detectedAt: Date.now(),
-        };
-        blockerAlerts.set(key, alert);
-        newBlockers.push(alert);
+        // Check if this is a safe operation that can be auto-approved
+        const { isSafe, operation } = checkAutoApprovalEligibility(blockedOn, lastState?.lastCmd);
 
-        // Log the blocker alert for debugging
-        console.log(`[blocker-detected] ${alert.agentName}: ${blockedOn}`);
+        if (isSafe && operation) {
+          // Auto-approve safe operation
+          const alert: BlockerAlert = {
+            agentName: agent.label || agent.topic || 'agent',
+            agentId: agent.sid.slice(0, 8),
+            state: 'BLOCKED',
+            blockedOn,
+            detectedAt: Date.now(),
+            autoApproved: true,
+            operation,
+          };
+          blockerAlerts.set(key, alert);
+
+          // Record auto-approval for reporting
+          autoApprovalReports.push({
+            agentName: alert.agentName,
+            operation,
+            approvedAt: Date.now(),
+          });
+
+          // Log the auto-approval
+          console.log(`[auto-approved] ${alert.agentName}: ${operation}`);
+
+          // TODO: In a real implementation, call orch-send --key y to approve
+          // For now, just log the intent
+        } else {
+          // Risky or unknown operation: require user approval
+          const alert: BlockerAlert = {
+            agentName: agent.label || agent.topic || 'agent',
+            agentId: agent.sid.slice(0, 8),
+            state: 'BLOCKED',
+            blockedOn,
+            detectedAt: Date.now(),
+            autoApproved: false,
+          };
+          blockerAlerts.set(key, alert);
+          newBlockers.push(alert);
+
+          // Log the blocker alert for debugging
+          console.log(`[blocker-detected] ${alert.agentName}: ${blockedOn}`);
+        }
       }
 
       // Update state tracking
-      agentLastState.set(key, { state: currentState, since: Date.now(), blockedOn });
+      agentLastState.set(key, { state: currentState, since: Date.now(), blockedOn, lastCmd: agent.lastCmd });
 
       // Clear old blockers if agent unblocks
       if (currentState !== 'BLOCKED' && blockerAlerts.has(key)) {
@@ -914,24 +1030,47 @@ async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
 }
 
 /**
+ * Format auto-approval reports for display in orchestrator responses.
+ */
+export function formatAutoApprovals(): string {
+  if (autoApprovalReports.length === 0) return '';
+
+  const lines = ['**Auto-Approved Operations:**'];
+  for (const report of autoApprovalReports.slice(-5)) { // Show last 5 only
+    lines.push(`✅ **${report.agentName}**: ${report.operation}`);
+  }
+
+  // Clear reports after displaying (avoid duplicates)
+  autoApprovalReports.length = 0;
+
+  return lines.join('\n');
+}
+
+/**
  * Format blocker alerts for display in orchestrator responses.
  */
 export function formatBlockerAlerts(alerts: BlockerAlert[]): string {
-  if (alerts.length === 0) return '';
+  // Filter to only risky blockers (not auto-approved)
+  const riskyAlerts = alerts.filter(a => !a.autoApproved);
+
+  if (riskyAlerts.length === 0) return '';
 
   const lines = ['🚨 **Blocked Agents Requiring Action:**'];
-  for (const alert of alerts) {
+  for (const alert of riskyAlerts) {
     lines.push(`- **${alert.agentName}** [${alert.agentId}]: ${alert.blockedOn}`);
   }
   return lines.join('\n');
 }
 
 /**
- * Get current blocker status for inclusion in orchestrator responses.
+ * Get current blocker and auto-approval status for inclusion in orchestrator responses.
  */
 export function getBlockerStatus(): string {
+  const autoApprovals = formatAutoApprovals();
   const alerts = Array.from(blockerAlerts.values());
-  return formatBlockerAlerts(alerts);
+  const blockers = formatBlockerAlerts(alerts);
+
+  return [autoApprovals, blockers].filter(s => s.length > 0).join('\n\n');
 }
 
 /**

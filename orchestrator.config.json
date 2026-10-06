@@ -1,0 +1,92 @@
+{
+  "autoApproval": {
+    "enabled": true,
+    "description": "Whitelist-based auto-approval for safe operations. Risky operations escalate to user.",
+    "safeOperations": {
+      "bashPatterns": [
+        "git commit",
+        "git add",
+        "git push",
+        "git branch",
+        "git checkout",
+        "git merge",
+        "git rebase",
+        "git log",
+        "git status",
+        "git diff",
+        "npm install",
+        "npm ci",
+        "npm run",
+        "npm test",
+        "npm build",
+        "npm start",
+        "bash orch-",
+        "bash bin/orch-",
+        "jq",
+        "grep",
+        "sed",
+        "awk",
+        "head",
+        "tail",
+        "wc",
+        "cat",
+        "echo",
+        "ls",
+        "pwd",
+        "mkdir -p",
+        "touch",
+        "cp",
+        "mv"
+      ],
+      "fileWritePatterns": [
+        "docs/",
+        "config/",
+        ".md$",
+        ".txt$",
+        "test/",
+        "spec/",
+        ".log$",
+        ".tmp$",
+        "orchestrator-sessions/",
+        ".claude/session-metadata/"
+      ],
+      "risky": {
+        "bashPatterns": [
+          "rm -rf",
+          "rm -r",
+          "delete",
+          "deploy",
+          "rollback",
+          "force-push",
+          "git push -f",
+          "git push --force",
+          "sudo",
+          "chmod",
+          "chown",
+          "curl",
+          "wget",
+          "send",
+          "email",
+          "slack",
+          "post",
+          "api"
+        ],
+        "filePatterns": [
+          "/etc/",
+          "/var/",
+          "config.json",
+          "secret",
+          "password",
+          "token",
+          "credential",
+          ".env"
+        ]
+      }
+    }
+  },
+  "monitoring": {
+    "blockersCheckIntervalMs": 5000,
+    "messageTimeoutMs": 30000,
+    "autoApprovalReportFormat": "✅ Auto-approved: {operation}"
+  }
+}

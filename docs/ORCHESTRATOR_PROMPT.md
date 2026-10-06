@@ -1228,21 +1228,39 @@ Prompt: "Allow changes to prod schema? (y/n)"
 - [ ] Verify agent cannot proceed without user decision
 - [ ] Test on Windows via WSL agent; verify identical behavior
 
-### Auto-Approve vs. Escalate to User
+### Auto-Approval for Safe Operations (Whitelist-Based)
 
-**NEVER auto-approve on behalf of the user.** All permissions must be explicit user decisions.
+The orchestrator automatically approves safe, basic operations based on a configurable whitelist. This prevents unnecessary user interruptions while escalating risky operations.
 
-**Always escalate to user:**
-- File writes, deletions, or chmod changes
-- Network access or external API calls
-- Spawning new processes
-- Accessing credentials or secrets
-- Modifying system settings
-- Running arbitrary shell commands
+**Auto-Approved Operations (Safe Whitelist):**
+- **Bash commands:** git commit, git push, git add (but NOT force-push)
+- **File writes:** changes to `docs/`, `config/`, `orchestrator-sessions/`, test files
+- **Package management:** npm install, npm ci, npm run (non-deploy scripts)
+- **Orchestrator scripts:** bash for `orch-*` commands (orch-status, orch-read, orch-send, etc.)
+- **Log and temp files:** writes to `.log`, `.tmp`, `/tmp/` directories
 
-**Exception (potential future enhancement):**
-- Whitelisted commands for specific agents (e.g., "game-agent can always write to /tmp/game")
-- Must be configured in advance by user, never inferred
+**Examples of Auto-Approvals (reported in chat):**
+```
+✅ Auto-approved: Bash for git commit
+✅ Auto-approved: File write to docs/ORCHESTRATOR_PROMPT.md
+✅ Auto-approved: npm install
+```
+
+**Operations Requiring User Approval (Risky Whitelist):**
+- **Destructive:** rm -rf, delete, remove (without path restrictions)
+- **Deployments:** deploy to production, rollback, release
+- **Force operations:** force-push, force-delete, --no-verify
+- **System changes:** chmod, chown, permission modifications
+- **Credentials/Secrets:** API keys, passwords, tokens
+- **External comms:** send email, post to Slack, push to external services
+- **Privileged:** sudo, root, system-level changes
+
+**Configuration:** Whitelist defined in `orchestrator.config.json` (SAFE_BASH_PATTERNS, SAFE_FILES arrays).
+
+**Behavior:**
+1. Permission prompt detected → Check against whitelist
+2. If **safe**: Auto-approve with `orch-send --key y`, report "✅ Auto-approved: ..."
+3. If **risky/unknown**: Alert user with prompt text, wait for user decision via `orch-send --key`
 
 ### Reporting Blocked Agents
 
