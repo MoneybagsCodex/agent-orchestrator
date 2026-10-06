@@ -883,15 +883,18 @@ export interface BlockerAlert {
 }
 
 const blockerAlerts = new Map<string, BlockerAlert>();
+const reportedBlockers = new Set<string>();  // Track which blockers have been reported to orchestrator
 
 // Track auto-approvals to report in responses
 export interface AutoApprovalReport {
   agentName: string;
   operation: string;
   approvedAt: number;
+  reported?: boolean;  // True if reported to orchestrator
 }
 
 const autoApprovalReports: AutoApprovalReport[] = [];
+const reportedAutoApprovals = new Set<string>();  // Track which auto-approvals have been reported
 
 /**
  * Track a sent message. Called when orch-send or SendMessage is used.
@@ -1060,6 +1063,39 @@ export function formatBlockerAlerts(alerts: BlockerAlert[]): string {
     lines.push(`- **${alert.agentName}** [${alert.agentId}]: ${alert.blockedOn}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * Get new blockers that haven't been reported to orchestrator yet.
+ */
+export function getNewBlockers(): BlockerAlert[] {
+  const alerts = Array.from(blockerAlerts.values());
+  return alerts.filter(a => !reportedBlockers.has(`${a.agentName}:${a.agentId}`) && !a.autoApproved);
+}
+
+/**
+ * Mark blockers as reported to prevent duplicate alerts.
+ */
+export function markBlockersReported(blockers: BlockerAlert[]) {
+  for (const b of blockers) {
+    reportedBlockers.add(`${b.agentName}:${b.agentId}`);
+  }
+}
+
+/**
+ * Get new auto-approvals that haven't been reported to orchestrator yet.
+ */
+export function getNewAutoApprovals(): AutoApprovalReport[] {
+  return autoApprovalReports.filter(r => !reportedAutoApprovals.has(`${r.agentName}:${r.operation}`));
+}
+
+/**
+ * Mark auto-approvals as reported to prevent duplicate alerts.
+ */
+export function markAutoApprovalsReported(reports: AutoApprovalReport[]) {
+  for (const r of reports) {
+    reportedAutoApprovals.add(`${r.agentName}:${r.operation}`);
+  }
 }
 
 /**

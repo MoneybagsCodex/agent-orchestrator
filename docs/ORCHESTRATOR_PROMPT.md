@@ -1388,6 +1388,61 @@ When reporting multi-agent status, blocked agents take priority:
 
 ---
 
+## 22. Active Alerting to Master-Orchestrator Session
+
+The orchestrator proactively sends alerts to its own session (master-orchestrator) when it detects NEW blockers or auto-approvals, rather than waiting for the user to poll.
+
+### Alert Types and Format
+
+**Blocker Alert (New):**
+When an agent transitions to BLOCKED state for the first time:
+```
+SendMessage(to: "master-orchestrator", message: "🚨 Blocker detected: **deploy-agent** [d3f456] waiting on: Allow prod schema changes? (y/n)")
+```
+
+**Auto-Approval Alert:**
+When an operation is automatically approved based on whitelist:
+```
+SendMessage(to: "master-orchestrator", message: "✅ Auto-approved: git commit for **code-agent** [a1b2c3]")
+```
+
+### How It Works
+
+1. **Blocker Detection:** `orch-status` shows agent in BLOCKED state (permission prompt)
+2. **Check Uniqueness:** Orchestrator tracks which blockers have been reported (not duplicates)
+3. **Send Alert:** If NEW blocker, send alert via SendMessage to "master-orchestrator"
+4. **Continue Work:** User doesn't need to check status manually; alert arrives proactively
+
+### Implementation
+
+- **New Blocker Tracking:** `getNewBlockers()` returns only blockers not yet reported
+- **Mark Reported:** `markBlockersReported()` prevents duplicate alerts for same blocker
+- **New Auto-Approvals:** `getNewAutoApprovals()` returns only unreported auto-approvals  
+- **Mark Reported:** `markAutoApprovalsReported()` prevents duplicate alerts
+
+### Example Flow
+
+```
+Time T0: Deploy agent receives permission prompt
+         Server detects blocker, logs it
+Time T1: Orchestrator runs orch-status
+         Sees NEW blocker (not in reported set)
+         Sends alert: "🚨 Blocker detected: **deploy-agent** waiting on: Allow prod schema changes?"
+         Marks blocker as reported
+         User sees alert in next turn
+Time T2: Deploy agent unblocks (permission decided)
+         Blocker cleared from tracking
+```
+
+### Benefits
+
+- **Proactive:** Blockers surface immediately without polling
+- **No Duplicates:** Each blocker alerted only once (tracked by agent name + ID)
+- **Efficient:** Only NEW blockers and auto-approvals trigger alerts
+- **Operator Friendly:** Alerts arrive naturally in orchestrator's own session
+
+---
+
 ## Checklist: Is the Orchestrator Working Correctly?
 
 - ✅ Every status report includes all live agents with label, ID, state, summary
