@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "description": "Master orchestrator configuration",
+    "platforms": "Mac/Linux/Windows (platform-agnostic)",
+    "pathNotes": "All paths use forward slashes (/) which are cross-platform compatible in Node.js and when referenced via SendMessage. Windows absolute paths like C:\\Users\\ are automatically converted via path.resolve()."
+  },
   "autoApproval": {
     "enabled": true,
     "description": "Whitelist-based auto-approval for safe operations. Risky operations escalate to user.",

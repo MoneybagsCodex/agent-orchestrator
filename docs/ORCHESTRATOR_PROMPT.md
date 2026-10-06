@@ -1420,6 +1420,20 @@ SendMessage(to: "master-orchestrator", message: "✅ Auto-approved: git commit f
 - **New Auto-Approvals:** `getNewAutoApprovals()` returns only unreported auto-approvals  
 - **Mark Reported:** `markAutoApprovalsReported()` prevents duplicate alerts
 
+### Platform Compatibility: Socket Type Abstraction
+
+**[Mac/Linux]**
+- Peer sockets: Unix domain sockets (`uds:/tmp/cc-socks/<pid>.sock`)
+- SendMessage delivery: Uses UDS for inter-session communication
+- Alerting: Alert via SendMessage reaches orchestrator over UDS
+
+**[Windows]**
+- Peer sockets: TCP fallback on Windows <11 22H2, native UDS on 11 22H2+
+- SendMessage delivery: Claude Code abstracts socket type (UDS or TCP)
+- Alerting: Alert via SendMessage reaches orchestrator identically (socket type transparent)
+
+**Key Point:** SendMessage is a Claude Code tool that abstracts the underlying socket type. Alerting code works identically on all platforms—no conditional logic needed. The `SendMessage(to: "master-orchestrator", message: "...")` call works whether "master-orchestrator" is reachable via UDS or TCP.
+
 ### Example Flow
 
 ```
@@ -1440,6 +1454,24 @@ Time T2: Deploy agent unblocks (permission decided)
 - **No Duplicates:** Each blocker alerted only once (tracked by agent name + ID)
 - **Efficient:** Only NEW blockers and auto-approvals trigger alerts
 - **Operator Friendly:** Alerts arrive naturally in orchestrator's own session
+- **Platform Agnostic:** SendMessage handles UDS/TCP abstraction; works identically on Mac, Linux, Windows
+
+### Testing Checklist
+
+**All Platforms (Mac/Linux/Windows):**
+- [ ] Trigger a permission prompt in an agent (run a tool that requires approval)
+- [ ] Verify orchestrator detects blocker within 5-10 seconds
+- [ ] Verify alert message appears: "🚨 Blocker detected: ..."
+- [ ] Verify alert appears only once (no duplicates)
+- [ ] Approve the blocker (orch-send --key y)
+- [ ] Verify blocker cleared from tracking
+- [ ] Verify no more alerts for that blocker
+
+**Windows-Specific:**
+- [ ] WSL agent and native agent both trigger alerts correctly
+- [ ] SendMessage reaches master-orchestrator (TCP or UDS, transparent)
+- [ ] No blocking or timeouts in alert delivery
+- [ ] Orchestrator continues running while alerts are sent
 
 ---
 
