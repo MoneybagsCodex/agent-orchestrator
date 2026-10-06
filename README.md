@@ -46,6 +46,7 @@ Design rules that come from that purpose:
 | `src/autoplan.ts` | Detects plan steps and completions from agent output |
 | `bin/orch-*` | The command-line tools the orchestrator (and you) use; `orch-overview` and `orch-cost` are good first commands |
 | `docs/MASTER_PROMPT.md` | **The orchestrator's system prompt** (source of truth), runtime context, and Windows port checklist |
+| `docs/ORCHESTRATOR_PROMPT.md` | **Complete interaction guidelines** for orchestrator behavior: multi-agent reporting, CLI protocol, communication style, status format, git governance, porting checklist |
 | `docs/` | Plans/sub-agents and cost control |
 | `src/demo.ts`, `orchestrator.ts`, `state-machine.ts`, `router.ts`, `mission-parser.ts`, `agent-registry.ts`, `master-agent.ts`, `api-server.ts` | Original workflow-engine prototype. Not used by the running server; `npm run build` fails on them (see SETUP.md) |
 
