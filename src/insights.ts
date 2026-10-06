@@ -780,6 +780,172 @@ async function watch() {
   } catch (e) { console.error('[insights watch]', (e as Error).message); }
 }
 
+// ---- Active Blocker Monitoring & Message Status Tracking
+
+export interface MessageBubble {
+  to: string;           // agent name or peer address
+  text: string;
+  sentAt: number;       // timestamp
+  status: 'sent' | 'pending' | 'received' | 'failed' | 'timeout';
+  repliedAt?: number;
+  reply?: string;       // first 100 chars of reply
+  timeoutAt: number;    // 30 seconds from sent time
+}
+
+// Track sent messages and their status
+const messageBubbles = new Map<string, MessageBubble>();
+
+// Track agent state transitions to detect blockers
+const agentLastState = new Map<string, { state: string; since: number; blockedOn?: string }>();
+
+// Emit alert when agent becomes blocked
+export interface BlockerAlert {
+  agentName: string;
+  agentId: string;
+  state: 'BLOCKED';
+  blockedOn: string;  // permission prompt text
+  detectedAt: number;
+}
+
+const blockerAlerts = new Map<string, BlockerAlert>();
+
+/**
+ * Track a sent message. Called when orch-send or SendMessage is used.
+ * Returns a status bubble string for display.
+ */
+export function trackSentMessage(to: string, text: string): string {
+  const key = `${to}:${Date.now()}`;
+  const bubble: MessageBubble = {
+    to,
+    text,
+    sentAt: Date.now(),
+    status: 'sent',
+    timeoutAt: Date.now() + 30000, // 30 second timeout
+  };
+  messageBubbles.set(key, bubble);
+
+  // Clean up very old bubbles (>2 minutes)
+  const cutoff = Date.now() - 120000;
+  for (const [k, v] of messageBubbles.entries()) {
+    if (v.sentAt < cutoff) messageBubbles.delete(k);
+  }
+
+  return formatStatusBubble(bubble);
+}
+
+/**
+ * Update a message status (e.g., when reply arrives).
+ */
+export function updateMessageStatus(to: string, status: 'pending' | 'received' | 'failed', reply?: string) {
+  for (const [_k, bubble] of messageBubbles.entries()) {
+    if (bubble.to === to && bubble.status !== 'received' && bubble.status !== 'failed') {
+      bubble.status = status;
+      bubble.repliedAt = Date.now();
+      if (reply) bubble.reply = reply.slice(0, 100);
+      break;
+    }
+  }
+}
+
+/**
+ * Format a status bubble for display in orchestrator responses.
+ */
+function formatStatusBubble(bubble: MessageBubble): string {
+  const elapsed = Math.round((Date.now() - bubble.sentAt) / 1000);
+  switch (bubble.status) {
+    case 'sent':
+      return `⏳ Sent to **${bubble.to}**: waiting for reply (${elapsed} sec elapsed)`;
+    case 'pending':
+      return `📬 Pending approval from **${bubble.to}**: user must approve cross-session message`;
+    case 'received':
+      return `✅ Reply received from **${bubble.to}**: "${bubble.reply || 'acknowledged'}"`;
+    case 'failed':
+      return `❌ Failed to deliver to **${bubble.to}**: ${bubble.reply || 'unreachable'}`;
+    case 'timeout':
+      return `❌ No reply from **${bubble.to}** after 30 sec. Agent may be stuck. Check terminal?`;
+  }
+}
+
+/**
+ * Monitor agent states and detect blocked agents. Called every 5-10 seconds by watch().
+ * Returns blockers that need immediate user attention.
+ */
+async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
+  try {
+    const agents = await getAgents();
+    const newBlockers: BlockerAlert[] = [];
+
+    for (const agent of agents) {
+      const key = `${agent.sid}:${agent.pid}`;
+      const lastState = agentLastState.get(key);
+      const currentState = agent.state || 'UNKNOWN';
+      const blockedOn = agent.blockedOn || agent.prompt || '';
+
+      // Detect state transition to BLOCKED
+      if (currentState === 'BLOCKED' && (!lastState || lastState.state !== 'BLOCKED')) {
+        const alert: BlockerAlert = {
+          agentName: agent.label || agent.topic || 'agent',
+          agentId: agent.sid.slice(0, 8),
+          state: 'BLOCKED',
+          blockedOn,
+          detectedAt: Date.now(),
+        };
+        blockerAlerts.set(key, alert);
+        newBlockers.push(alert);
+
+        // Log the blocker alert for debugging
+        console.log(`[blocker-detected] ${alert.agentName}: ${blockedOn}`);
+      }
+
+      // Update state tracking
+      agentLastState.set(key, { state: currentState, since: Date.now(), blockedOn });
+
+      // Clear old blockers if agent unblocks
+      if (currentState !== 'BLOCKED' && blockerAlerts.has(key)) {
+        blockerAlerts.delete(key);
+      }
+    }
+
+    return newBlockers;
+  } catch (e) {
+    // Silently fail if getAgents() is unavailable
+    return [];
+  }
+}
+
+/**
+ * Format blocker alerts for display in orchestrator responses.
+ */
+export function formatBlockerAlerts(alerts: BlockerAlert[]): string {
+  if (alerts.length === 0) return '';
+
+  const lines = ['🚨 **Blocked Agents Requiring Action:**'];
+  for (const alert of alerts) {
+    lines.push(`- **${alert.agentName}** [${alert.agentId}]: ${alert.blockedOn}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Get current blocker status for inclusion in orchestrator responses.
+ */
+export function getBlockerStatus(): string {
+  const alerts = Array.from(blockerAlerts.values());
+  return formatBlockerAlerts(alerts);
+}
+
+/**
+ * Update message timeouts. Called by watch() every 5-10 seconds.
+ */
+function updateMessageTimeouts() {
+  const now = Date.now();
+  for (const [_k, bubble] of messageBubbles.entries()) {
+    if (bubble.status === 'sent' && now > bubble.timeoutAt) {
+      bubble.status = 'timeout';
+    }
+  }
+}
+
 export function startInsights(d: Deps) {
   deps = d;
   d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e, d.host.model));
@@ -789,5 +955,15 @@ export function startInsights(d: Deps) {
     row.usd = estimateUsd(row, d.host.model); loadRows().push(row);
     try { fs.appendFileSync(USAGE_LOG, JSON.stringify(row) + '\n'); } catch { /* best effort */ }
   });
-  setInterval(watch, 5000);
+
+  // Enhanced watch loop: monitor blockers and message timeouts every 5 seconds
+  setInterval(async () => {
+    try {
+      await monitorAgentBlockers();
+      updateMessageTimeouts();
+      watch();
+    } catch (e) {
+      console.error('[insights monitor]', (e as Error).message);
+    }
+  }, 5000);
 }

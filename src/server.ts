@@ -19,7 +19,7 @@ import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
 import { detectWork, detectCompletion, sameWork, type Detected, type Completion } from './autoplan';
-import { getAgents, costsSummary, orchSelf, orchSelfLine, readBudgets, setBudgets, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights } from './insights';
+import { getAgents, costsSummary, orchSelf, orchSelfLine, readBudgets, setBudgets, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights, getBlockerStatus, trackSentMessage, updateMessageStatus } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -179,7 +179,13 @@ let statusCache: { at: number; body: unknown } | null = null;
 app.get('/status', async (_req, res) => {
   try {
     if (statusCache && Date.now() - statusCache.at < 2000) return res.json(statusCache.body);
-    const body = { ...(await buildStatus() as object), orchestrator: orchSelf() };
+    const status = await buildStatus() as any;
+    const blockers = getBlockerStatus();
+    const body = {
+      ...status,
+      orchestrator: orchSelf(),
+      blockers: blockers ? blockers.split('\n') : []
+    };
     statusCache = { at: Date.now(), body };
     res.json(body);
   } catch (e) { res.status(503).json({ error: `status unavailable: ${(e as Error).message}` }); }
