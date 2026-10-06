@@ -712,6 +712,481 @@ Use these to know when you're getting expensive and adjust accordingly.
 
 ---
 
+## 19. Agent Discovery and Spawning (Architecture and Plans)
+
+The orchestrator coordinates multiple agents across multiple domains. This section documents how agents are discovered, resumed, spawned, and registered.
+
+### Current State: Session Discovery
+
+**Session Metadata Storage:**
+- Location: `~/.claude/sessions/`
+- Files: `<port>.json` (metadata) + `<port>.<key>.key` (encryption key)
+- Example metadata:
+  ```json
+  {
+    "pid": 23689,
+    "sessionId": "57341b92-8ded-4d6c-9a99-421b30617ae4",
+    "name": "master-orchestrator",
+    "status": "idle",
+    "startedAt": 1791215368790,
+    "messagingSocketPath": "/tmp/cc-socks/23689.sock"
+  }
+  ```
+
+**Live Agent Discovery:**
+- `orch_sessions()` (bin/_lib.sh) queries the bridge at `http://localhost:3002/terminals`
+- Enumerates all running Claude Code processes
+- Falls back to `~/.claude/sessions/` metadata if bridge is unreachable
+- Each agent has: label, topic (conversation title), session ID, PID, peer socket, state
+
+**Dormant Agent Detection:**
+- Dormant = session metadata exists but process is not running (`pid` doesn't exist)
+- Transcripts remain at `~/.claude/projects/<project-id>/<sessionId>.jsonl`
+- Can resume dormant agents via `claude --resume <sessionId>`
+
+### Resuming Agents by Name
+
+**Current Implementation:**
+The orchestrator resumes itself by name:
+```typescript
+// src/host.ts line 112
+...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
+'--name', 'master-orchestrator',
+```
+
+**Resume Mechanics:**
+- `--name <agent-name>` is a user-set stable identifier (survives restart)
+- `--resume <sessionId>` restores conversation history from `messages.json`
+- Name is stored in `~/.claude/sessions/<pid>.json` and is queryable
+
+**Finding Agents by Name:**
+- `orch_resolve()` (bin/_lib.sh) matches by:
+  1. Session ID prefix (e.g., `57341b92` matches full ID)
+  2. Conversation title / topic (exact, then partial)
+  3. Panel label (fallback only)
+- **Gap:** CLI can't directly query by name yet; enhancement needed
+
+### Spawning New Agents: Recommended Approach
+
+**Programmatic Spawn (Node.js):**
+```typescript
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+
+const agentName = 'game-agent';
+const sessionId = randomUUID();
+
+const proc = spawn('claude', [
+  '-p',  // non-interactive
+  '--name', agentName,
+  '--session-id', sessionId,
+  '--model', 'claude-haiku-4-5-20251001',
+  '--tools', 'Bash,ListAgents,SendMessage',
+  '--permission-mode', 'dontAsk',
+  '--append-system-prompt', agentPrompt,
+  '--add-dir', '/path/to/project',
+], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+
+// Store metadata for future resume/discovery
+const metadata = {
+  name: agentName,
+  domain: 'orb-brawl',
+  sessionId,
+  spawnedAt: Date.now(),
+  prompt: agentPrompt,
+  tools: ['Bash', 'ListAgents', 'SendMessage'],
+};
+```
+
+**Background Spawn (Recommended for Orchestrator):**
+- Use `--bg` flag: `spawn('claude', [..., '--bg', 'Initial task...'])`
+- Process spawns in background and returns immediately
+- Prints session ID to stdout; parent reads it and exits
+- Agent continues running independently
+
+### Three-Phase Implementation Plan
+
+**Phase 1: API Endpoints (2-3 hours)** — Foundation for all other modes
+- `POST /agents/spawn` — Spawn a new agent
+  - Input: name, domain, prompt, tools, model, initial_task
+  - Output: sessionId, pid, peer socket, status
+- `GET /agents/discover` — List all agents (live + dormant)
+  - Output: array of agents with status, metadata, transcript location
+- `GET /agents/<name-or-sid>/resume` — Resume a dormant agent
+- Implementation: Add to `src/server.ts`, use existing `spawn()` and `orch_sessions()` logic
+
+**Phase 2: CLI Tools (1-2 hours)** — User-friendly shell interface
+- `orch-spawn <name> [domain]` — Spawn new agent
+  - Flags: `--prompt <text>`, `--tools <list>`, `--model <model>`, `--background`
+- `orch-discover [--json] [--dormant-only]` — List agents
+- `orch-resume <name-or-sid>` — Resume dormant agent by name
+- `orch-agents [domain]` — List agents in a specific domain
+- Implementation: Shell wrappers around Phase 1 API
+
+**Phase 3: Declarative Configuration (Future)** — Ops-friendly declarative deployment
+- File: `agents.yaml`
+  ```yaml
+  domains:
+    orb-brawl:
+      agents:
+        - name: game-agent
+          prompt: |
+            You are the game orchestrator for Chief Ball...
+          tools: [Bash, ListAgents, SendMessage]
+          model: claude-haiku-4-5-20251001
+  ```
+- Command: `orch-deploy-config agents.yaml` — Auto-spawn all agents from config
+- Auto-spawn on orchestrator startup if file exists
+
+### Agent Registry and Lifecycle
+
+**Session Metadata Registry:**
+- Location: `~/.claude/session-metadata/`
+- Structure: `<domain>/<agent-name>.json`
+- Contents: name, domain, sessionId, spawnedAt, prompt, tools, createdBy, status
+- Used for: agent discovery, resume-by-name, lifecycle tracking
+
+**Agent Lifecycle States:**
+```
+DORMANT (session exists, process not running)
+  ↓
+SPAWNING (process starting)
+  ↓
+STARTING (initializing)
+  ↓
+IDLE (waiting for input)
+  ↓
+WORKING (executing task)
+  ↓
+BLOCKED (waiting on permission/decision)
+  ↓
+IDLE (again)
+  ↓
+EXITED (process ended, metadata persists)
+```
+
+**Discovery Flow:**
+1. User asks "what agents exist?"
+2. Call `orch-discover` or API `GET /agents/discover`
+3. Query bridge (`/terminals`) for live agents
+4. Enrich with `~/.claude/session-metadata/` for dormant agents
+5. Return combined list with status, uptime, last activity, transcript path
+
+---
+
+## 20. Status Indicators and Message Tracking
+
+When the orchestrator sends instructions to agents via `orch-send` or `SendMessage`, it should track message delivery and reply status. This section documents the planned status bubble system.
+
+### Status Bubble Indicators (Emoji + Text)
+
+**Emoji Indicators:**
+- `⏳` **Waiting** — Message sent, waiting for reply (time elapsed shown)
+- `📬` **Pending** — Message in agent's inbox (awaiting user approval on their side)
+- `✅` **Received** — Reply arrived; message acknowledged
+- `❌` **Failed** — Delivery failed, timeout, or agent unreachable
+
+**Text Format:**
+```
+⏳ Sent to **agent-name** [abc123d]: waiting for reply (5 sec elapsed)
+📬 Pending approval from **agent-name** [abc123d]: user must approve cross-session message
+✅ Reply received from **agent-name** [abc123d]: "Task started. ETA: 10 min"
+❌ No reply from **agent-name** [abc123d] after 30 sec. Check terminal?
+```
+
+### Implementation Approach (Planned, Not Yet Coded)
+
+**Message Registry:**
+```typescript
+// Track sent messages in memory (or persisted state)
+interface SentMessage {
+  to: string;           // agent name or peer socket
+  text: string;         // message sent
+  sentAt: number;       // timestamp
+  status: 'sent' | 'pending' | 'received' | 'failed';
+  repliedAt?: number;   // when reply arrived
+  reply?: string;       // reply text (first 100 chars)
+  timeoutAt?: number;   // when it times out (sent + 30 sec)
+}
+```
+
+**Display in Orchestrator Responses:**
+```
+You: "Send the game agent to step 5."
+
+orch-send game-agent "Step 5: Run the tournament simulation"
+
+⏳ Sent to **game-agent** [a1b2c3d4]: waiting for reply (0 sec elapsed)
+
+[Wait 5 seconds; game-agent responds via SendMessage]
+
+✅ Reply received from **game-agent** [a1b2c3d4]: "Starting tournament. Spawning 8 match threads..."
+
+Game agent has begun step 5. Waiting for tournament results (~5 min).
+```
+
+**Timeout and Fallback:**
+- If no reply within 30 seconds: show `❌ No reply from **agent-name** after 30 sec. Agent may be stuck. Check its terminal?`
+- User can then: run `orch-read <agent>` to see what it's doing, or send another message to unblock it
+
+### Realistic Examples
+
+**Example 1: Rapid Delegation**
+```
+You: "Start three tasks in parallel: game setup, data validation, and performance profiling."
+
+Sent three messages:
+⏳ Sent to **setup-agent** [aaa111]: waiting for reply
+⏳ Sent to **validator-agent** [bbb222]: waiting for reply
+⏳ Sent to **profiler-agent** [ccc333]: waiting for reply
+
+[After 2 seconds, setup-agent replies]
+
+✅ Reply received from **setup-agent** [aaa111]: "Environment ready. Game initialized."
+
+[After 4 seconds, validator-agent replies]
+
+✅ Reply received from **validator-agent** [bbb222]: "Validation running. 340 test cases..."
+
+[After 10 seconds, profiler-agent still waiting]
+
+⏳ Sent to **profiler-agent** [ccc333]: waiting for reply (10 sec elapsed)
+
+Setup and validation are running. Profiler may be busy; I'll check again in 10 seconds.
+```
+
+**Example 2: Permission Hold**
+```
+You: "Deploy to production."
+
+orch-send deploy-agent "Deploy v2.1.0 to production"
+
+📬 Pending approval from **deploy-agent** [def456]: user on that agent must approve cross-session message.
+
+Agent's user sees a permission prompt on their terminal. Waiting for their decision...
+
+[After 15 seconds, agent's user approves]
+
+✅ Reply received from **deploy-agent** [def456]: "Deployment approved. Rolling out v2.1.0 to 5 regions..."
+
+Deployment started. Monitor via **deploy-agent** transcript.
+```
+
+**Example 3: Timeout and Recovery**
+```
+You: "Check the database status."
+
+orch-send db-agent "Run integrity check on production database"
+
+⏳ Sent to **db-agent** [ghi789]: waiting for reply (15 sec elapsed)
+⏳ Sent to **db-agent** [ghi789]: waiting for reply (25 sec elapsed)
+
+❌ No reply from **db-agent** [ghi789] after 30 sec. Agent may be stuck. Check terminal?
+
+Let me check what's happening:
+
+orch-read db-agent
+
+[Shows recent output: "Checking database... 82% complete"]
+
+db-agent is still working; the check is taking longer than expected. Waiting...
+
+[After 45 seconds total]
+
+✅ Reply received from **db-agent** [ghi789]: "Check complete. 0 errors, 12 warnings in table indexes."
+
+Database is healthy with minor index warnings.
+```
+
+### Integration with Response Format (Section 13)
+
+Status bubbles are part of the orchestrator's multi-agent response format. They appear:
+1. **Inline after each `orch-send`:** Show delivery status immediately
+2. **In status update blocks:** "Sent to X (waiting), Reply from Y (received), No reply from Z (timeout)"
+3. **In agent status digests:** Each agent shows last message status if relevant
+
+Example integrated response:
+```
+**Sent three tasks.**
+
+⏳ Sent to **code-agent** [aaa]: waiting for reply (3 sec)
+✅ Reply from **test-agent** [bbb]: "Tests running"
+⏳ Sent to **deploy-agent** [ccc]: waiting for reply (5 sec)
+
+**Agent status:**
+- **code-agent** [aaa]: WORKING · refactoring auth module · message in-flight
+- **test-agent** [bbb]: WORKING · running integration suite · replied 2 sec ago
+- **deploy-agent** [ccc]: IDLE · awaiting instructions · message pending reply
+
+All three agents are active. Code and test are making progress; deploy is ready when you signal.
+```
+
+---
+
+## 21. Permission Approval Handling
+
+Agents running in locked-down mode (`--permission-mode dontAsk`) will sometimes encounter permission prompts that block them. The orchestrator must detect these blockers, report them immediately to the user, and facilitate approval.
+
+### Detecting Blocked Agents
+
+**Blocked State Indicators:**
+- `orch-status` shows `BLOCKED` state with reason, e.g.: `BLOCKED: permission prompt`
+- Agent's screen buffer (visible in `orch-status` output) contains text like:
+  - "Do you want to..."
+  - "Esc to cancel, Enter to confirm"
+  - "Allow write access to [resource]? (y/n)"
+  - "Enter your password:"
+  - "Permission required for [action]"
+- Agent's `waitingFor` field in session metadata is populated
+
+**Proactive Monitoring:**
+- Run `orch-status` every 5-10 seconds to catch new blockers
+- `orch-overview` includes a "Blocked agents" section
+- Dashboard can show blocked agents in red/warning state
+- Send proactive notification: "Agent **name** is waiting on your approval"
+
+### Auto-Approve vs. Escalate to User
+
+**NEVER auto-approve on behalf of the user.** All permissions must be explicit user decisions.
+
+**Always escalate to user:**
+- File writes, deletions, or chmod changes
+- Network access or external API calls
+- Spawning new processes
+- Accessing credentials or secrets
+- Modifying system settings
+- Running arbitrary shell commands
+
+**Exception (potential future enhancement):**
+- Whitelisted commands for specific agents (e.g., "game-agent can always write to /tmp/game")
+- Must be configured in advance by user, never inferred
+
+### Reporting Blocked Agents
+
+**Format in Status Report:**
+```
+**Agent status:**
+- **deploy-agent** [d3f456]: BLOCKED · last asked "Deploy to production" · waiting on: "Allow changes to prod schema? (y/n)"
+- **code-agent** [a1b2c3]: WORKING · refactoring auth module · no blockers
+
+**Action required:** Deploy-agent needs your approval. Do you want to allow the schema change?
+```
+
+**Inline in Response:**
+After any operation, if an agent becomes blocked, lead with it:
+```
+⏳ Sent to **deploy-agent** [d3f456]: waiting for reply
+
+Wait—**deploy-agent** is now blocked on a permission prompt:
+"Allow changes to prod schema? (y/n)"
+
+The deployment is paused until you decide. Should I tell it yes, or no?
+```
+
+### Using orch-send --key to Unblock
+
+**Available Keys:**
+- `enter` — Press Enter (confirm, proceed)
+- `y` or `yes` — Press y (affirmative)
+- `n` or `no` — Press n (negative)
+- `esc` — Press Esc (cancel)
+- `ctrl-c` — Send Ctrl-C (interrupt)
+- `tab` — Press Tab (navigate options)
+
+**Workflow:**
+1. `orch-status` detects blocked agent
+2. Orchestrator reports the prompt to user with exact text
+3. User decides: "tell deploy-agent yes" or "tell deploy-agent no"
+4. Orchestrator runs: `orch-send deploy-agent --key y`
+5. Agent unblocks and continues
+
+**Example:**
+```
+Blocked prompt on **deploy-agent** [d3f456]:
+"Allow changes to prod schema? (y/n)"
+
+orch-send deploy-agent --key y
+
+✅ Approved. Deploy-agent proceeding...
+
+[After 5 seconds]
+
+✅ Reply received from **deploy-agent** [d3f456]: "Schema migration applied. Running tests..."
+```
+
+### Common Permission Prompt Scenarios
+
+**File System Access:**
+```
+"Allow write access to /home/user/project/data.json? (y/n)"
+
+Orchestrator reports: "Agent wants to write to data.json. Approve?"
+User: "yes"
+orch-send agent-name --key y
+```
+
+**Network/API Access:**
+```
+"Allow HTTPS connection to api.github.com? (y/n)"
+
+Orchestrator reports: "Agent needs to call GitHub API. Approve?"
+User: "yes"
+orch-send agent-name --key y
+```
+
+**Credentials/Secrets:**
+```
+"This action requires your GitHub token. Approve? (y/n)"
+
+Orchestrator reports: "Agent is requesting GitHub credentials. DO NOT APPROVE unless you trust this agent's current task."
+User: "no"
+orch-send agent-name --key n
+```
+
+**Destructive Action Confirmation:**
+```
+"Delete 5 test files? (y/n)"
+
+Orchestrator reports: "Agent wants to delete test files. Confirm?"
+User: "yes"
+orch-send agent-name --key y
+```
+
+**Multi-Step Confirm:**
+```
+Screen shows:
+"WARNING: This will deploy to production.
+Press 'y' to confirm, 'n' to cancel, or 'Esc' to abort."
+
+Agent is blocked, waiting. Orchestrator shows user the exact prompt.
+User: "I need to review this first"
+orch-send agent-name --key esc  # Cancel the action
+```
+
+### Blocked Agent Timeout
+
+**If an agent is blocked for >5 minutes:**
+- Assume it's stuck or the user forgot about it
+- Send proactive reminder: "Agent **name** has been waiting on approval for 5 min. Still want to proceed?"
+- Option to send `orch-send agent-name --key esc` to cancel the blocked action
+- Option to check the agent's transcript: `orch-read agent-name`
+
+### Integration with Section 13 (Response Format)
+
+When reporting multi-agent status, blocked agents take priority:
+
+```
+**Blocked agents need your decision:**
+- **deploy-agent** [d3f456]: Waiting on "Allow prod schema changes? (y/n)"
+
+**Working agents:**
+- **test-agent** [a1b2c3]: Running integration tests (15% done)
+
+**Action:** Should I approve the schema change for deploy-agent?
+```
+
+---
+
 ## Checklist: Is the Orchestrator Working Correctly?
 
 - ✅ Every status report includes all live agents with label, ID, state, summary
@@ -728,6 +1203,14 @@ Use these to know when you're getting expensive and adjust accordingly.
 - ✅ No re-explaining; assume the user knows what was said before
 - ✅ Git commits are auto-pushed immediately after changes
 - ✅ Standing instructions are respected and reported
+- ✅ Agent discovery works: live agents from bridge, dormant from metadata
+- ✅ Resume by name works: `--name <agent-name> --resume <sid>`
+- ✅ Status bubbles shown: ⏳ waiting, 📬 pending, ✅ received, ❌ failed
+- ✅ Message tracking: sent time, reply time (or timeout after 30 sec)
+- ✅ Blocked agents detected and reported immediately in status
+- ✅ Permission prompts shown to user with exact text; never auto-approved
+- ✅ `orch-send --key` used to answer prompts only after user decision
+- ✅ Proactive monitoring: `orch-status` checks agent state regularly
 - ✅ Response format is consistent: action → status → prose → next move
 - ✅ Plans are per-domain; steps tracked; no mixing domains
 - ✅ Errors are reported plainly without invented recovery attempts
