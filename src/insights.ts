@@ -796,6 +796,8 @@ interface AutoApprovalConfig {
     blockersCheckIntervalMs: number;
     messageTimeoutMs: number;
     autoApprovalReportFormat: string;
+    blockerTimeoutMs?: number;      // Clear stale blockers after this time
+    maxApprovalsPerMinute?: number; // Rate limit
   };
 }
 
@@ -810,51 +812,151 @@ function loadAutoApprovalConfig(): AutoApprovalConfig {
     autoApprovalConfig = JSON.parse(raw).autoApproval || { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } } };
   } catch (e) {
     // Config file not found or invalid; disable auto-approval
-    autoApprovalConfig = { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } }, monitoring: { blockersCheckIntervalMs: 5000, messageTimeoutMs: 30000, autoApprovalReportFormat: '✅ Auto-approved: {operation}' } };
+    autoApprovalConfig = { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } }, monitoring: { blockersCheckIntervalMs: 5000, messageTimeoutMs: 30000, autoApprovalReportFormat: '✅ Auto-approved: {operation}', blockerTimeoutMs: 300000, maxApprovalsPerMinute: 10 } };
   }
 
   return autoApprovalConfig;
 }
 
+// ---- Rate Limiting & Timeout Management
+const approvalHistory: { approvedAt: number; agentId: string }[] = [];
+const BLOCKER_TIMEOUT_MS = 300000; // 5 minutes
+const MAX_APPROVALS_PER_MINUTE = 10;
+
+/**
+ * Clean up old approval history (keep only last minute)
+ */
+function cleanupApprovalHistory() {
+  const oneMinuteAgo = Date.now() - 60000;
+  while (approvalHistory.length > 0 && approvalHistory[0].approvedAt < oneMinuteAgo) {
+    approvalHistory.shift();
+  }
+}
+
+/**
+ * Check if we've hit rate limit for approvals
+ */
+function isRateLimited(): boolean {
+  cleanupApprovalHistory();
+  return approvalHistory.length >= MAX_APPROVALS_PER_MINUTE;
+}
+
+/**
+ * Record an approval for rate limiting
+ */
+function recordApproval(agentId: string) {
+  approvalHistory.push({ approvedAt: Date.now(), agentId });
+  cleanupApprovalHistory();
+}
+
+/**
+ * Clean up stale blockers that haven't been resolved (timed out)
+ */
+function cleanupStaleBLockers() {
+  const now = Date.now();
+  const staleKeys: string[] = [];
+
+  for (const [key, alert] of blockerAlerts.entries()) {
+    if (now - alert.detectedAt > BLOCKER_TIMEOUT_MS) {
+      staleKeys.push(key);
+      console.log(`[blocker-timeout] ${alert.agentName}: blocker unresolved for 5 minutes, clearing`);
+    }
+  }
+
+  for (const key of staleKeys) {
+    blockerAlerts.delete(key);
+    reportedBlockers.delete(key);
+  }
+}
+
+/**
+ * Handle agent termination: clean up its state and blockers
+ */
+function cleanupAgentState(agentKey: string) {
+  agentLastState.delete(agentKey);
+  blockerAlerts.delete(agentKey);
+  reportedBlockers.delete(agentKey);
+  console.log(`[cleanup-agent] Removed state for agent ${agentKey}`);
+}
+
+/**
+ * Expand environment variables in a command string
+ * E.g., "git commit -m $MESSAGE" with {MESSAGE: 'fix bug'} → "git commit -m fix bug"
+ */
+function expandEnvVars(cmd: string, env?: NodeJS.ProcessEnv): string {
+  if (!cmd || !env) return cmd;
+  let expanded = cmd;
+  const envVarPattern = /\$\{?([A-Z_][A-Z0-9_]*)\}?/gi;
+  expanded = expanded.replace(envVarPattern, (match, varName) => {
+    const key = varName.toUpperCase();
+    return env[key] ? String(env[key]) : match;
+  });
+  return expanded;
+}
+
 /**
  * Check if a permission prompt text matches a safe operation (whitelist).
+ * Handles prompt variations, env var expansion, and piped commands.
  * Returns: { isSafe: boolean, operation?: string }
  */
-export function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string): { isSafe: boolean; operation?: string } {
+export function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string, processEnv?: NodeJS.ProcessEnv): { isSafe: boolean; operation?: string } {
   const config = loadAutoApprovalConfig();
   if (!config.enabled) return { isSafe: false };
 
-  const prompt = promptText.toLowerCase();
-  const cmd = (agentLastCommand || '').toLowerCase();
+  // Expand environment variables in the command
+  let cmd = expandEnvVars(agentLastCommand || '', processEnv || process.env);
+  cmd = cmd.toLowerCase();
+
+  // Extract the actual command from prompt variations:
+  // "Allow 'git commit'?" → "git commit"
+  // "Permission denied. Allow 'git commit'?" → "git commit"
+  // "Do you authorize 'npm install'?" → "npm install"
+  let promptCmd = promptText;
+  const quotedPattern = /['"`](.*?)['"`]/;
+  const match = promptText.match(quotedPattern);
+  if (match && match[1]) {
+    promptCmd = match[1].toLowerCase();
+  } else {
+    promptCmd = promptText.toLowerCase();
+  }
 
   // Log for debugging
-  console.log('[auto-approval-check]', { prompt: prompt.slice(0, 80), cmd: cmd.slice(0, 80) });
+  console.log('[auto-approval-check]', { prompt: promptCmd.slice(0, 80), cmd: cmd.slice(0, 80) });
 
-  // Always check bash patterns first (don't require specific keywords in prompt)
+  // Check the primary command (first word for piped operations like "git log | grep fix")
+  const primaryCmd = cmd.split(/[|;]/).shift()?.trim() || '';
+
+  // Always check risky patterns FIRST (fail-safe: risky takes precedence)
   for (const pattern of config.safeOperations.risky.bashPatterns) {
-    if (cmd.includes(pattern.toLowerCase())) {
-      console.log('[auto-approval-denied]', 'risky pattern matched:', pattern);
+    const patternLower = pattern.toLowerCase();
+    if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
+      console.log('[auto-approval-denied]', 'risky bash pattern matched:', pattern);
       return { isSafe: false };
     }
   }
 
-  for (const pattern of config.safeOperations.bashPatterns) {
-    if (cmd.includes(pattern.toLowerCase())) {
-      console.log('[auto-approval-approved]', 'safe bash pattern matched:', pattern);
-      return { isSafe: true, operation: pattern };
-    }
-  }
-
-  // Check file write patterns
+  // Check risky file patterns
   for (const pattern of config.safeOperations.risky.filePatterns) {
-    if (cmd.includes(pattern.toLowerCase())) {
+    const patternLower = pattern.toLowerCase();
+    if (cmd.includes(patternLower) || promptCmd.includes(patternLower)) {
       console.log('[auto-approval-denied]', 'risky file pattern matched:', pattern);
       return { isSafe: false };
     }
   }
 
+  // Then check safe bash patterns
+  for (const pattern of config.safeOperations.bashPatterns) {
+    const patternLower = pattern.toLowerCase();
+    if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
+      console.log('[auto-approval-approved]', 'safe bash pattern matched:', pattern);
+      return { isSafe: true, operation: pattern };
+    }
+  }
+
+  // Check safe file write patterns
   for (const pattern of config.safeOperations.fileWritePatterns) {
-    if (cmd.includes(pattern.toLowerCase())) {
+    const patternLower = pattern.toLowerCase();
+    if (cmd.includes(patternLower) || promptCmd.includes(patternLower)) {
       console.log('[auto-approval-approved]', 'safe file pattern matched:', pattern);
       return { isSafe: true, operation: pattern };
     }
@@ -967,61 +1069,37 @@ function formatStatusBubble(bubble: MessageBubble): string {
 
 /**
  * Monitor agent states and detect blocked agents. Called every 5-10 seconds by watch().
+ * Handles: rate limiting, timeout cleanup, env var expansion, agent termination cleanup.
  * Returns blockers that need immediate user attention (excludes auto-approved).
  */
 export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
   try {
+    // Clean up stale state regularly
+    cleanupStaleBLockers();
+
     const agents = await getAgents();
     const newBlockers: BlockerAlert[] = [];
+    const currentAgentKeys = new Set<string>();
 
     console.log(`[listener-running] Monitoring ${agents.length} agents`);
 
     for (const agent of agents) {
       const key = `${agent.sid}:${agent.pid}`;
+      currentAgentKeys.add(key);
       const lastState = agentLastState.get(key);
       const currentState = agent.state || 'UNKNOWN';
       const blockedOn = agent.blockedOn || agent.prompt || '';
 
-      // Debug: log all agents
+      // Debug: log blocked agents
       if (currentState === 'BLOCKED') {
         console.log(`[listener-checking] Agent: ${agent.label || agent.topic || 'unknown'}, LastCmd: ${lastState?.lastCmd || 'none'}`);
       }
 
       // Detect state transition to BLOCKED
       if (currentState === 'BLOCKED' && (!lastState || lastState.state !== 'BLOCKED')) {
-        // Check if this is a safe operation that can be auto-approved
-        const { isSafe, operation } = checkAutoApprovalEligibility(blockedOn, lastState?.lastCmd);
-
-        if (isSafe && operation) {
-          // Auto-approve safe operation
-          const alert: BlockerAlert = {
-            agentName: agent.label || agent.topic || 'agent',
-            agentId: agent.sid.slice(0, 8),
-            state: 'BLOCKED',
-            blockedOn,
-            detectedAt: Date.now(),
-            autoApproved: true,
-            operation,
-          };
-          blockerAlerts.set(key, alert);
-
-          // Record auto-approval for reporting
-          autoApprovalReports.push({
-            agentName: alert.agentName,
-            operation,
-            approvedAt: Date.now(),
-          });
-
-          // Send approval command: orch-send <sid> --key y
-          try {
-            const approvalCmd = path.join(deps.binDir, 'orch-send');
-            await run(approvalCmd, [agent.sid.slice(0, 8), '--key', 'y'], env());
-            console.log(`[auto-approved] ${alert.agentName}: ${operation} (approval sent via orch-send)`);
-          } catch (e) {
-            console.error(`[auto-approval-failed] ${alert.agentName}: ${(e as Error).message.slice(0, 120)}`);
-          }
-        } else {
-          // Risky or unknown operation: require user approval
+        // Check if we've hit rate limit
+        if (isRateLimited()) {
+          console.log(`[auto-approval-rate-limited] Too many approvals in last minute (${approvalHistory.length}/${MAX_APPROVALS_PER_MINUTE})`);
           const alert: BlockerAlert = {
             agentName: agent.label || agent.topic || 'agent',
             agentId: agent.sid.slice(0, 8),
@@ -1032,9 +1110,55 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
           };
           blockerAlerts.set(key, alert);
           newBlockers.push(alert);
+        } else {
+          // Check if this is a safe operation that can be auto-approved
+          const { isSafe, operation } = checkAutoApprovalEligibility(blockedOn, lastState?.lastCmd, process.env);
 
-          // Log the blocker alert for debugging
-          console.log(`[blocker-detected] ${alert.agentName}: ${blockedOn}`);
+          if (isSafe && operation) {
+            // Auto-approve safe operation
+            const alert: BlockerAlert = {
+              agentName: agent.label || agent.topic || 'agent',
+              agentId: agent.sid.slice(0, 8),
+              state: 'BLOCKED',
+              blockedOn,
+              detectedAt: Date.now(),
+              autoApproved: true,
+              operation,
+            };
+            blockerAlerts.set(key, alert);
+            recordApproval(agent.sid.slice(0, 8));
+
+            // Record auto-approval for reporting
+            autoApprovalReports.push({
+              agentName: alert.agentName,
+              operation,
+              approvedAt: Date.now(),
+            });
+
+            // Send approval command: orch-send <sid> --key y
+            try {
+              const approvalCmd = path.join(deps.binDir, 'orch-send');
+              await run(approvalCmd, [agent.sid.slice(0, 8), '--key', 'y'], env());
+              console.log(`[auto-approved] ${alert.agentName}: ${operation} (approval sent via orch-send)`);
+            } catch (e) {
+              console.error(`[auto-approval-failed] ${alert.agentName}: ${(e as Error).message.slice(0, 120)}`);
+            }
+          } else {
+            // Risky or unknown operation: require user approval
+            const alert: BlockerAlert = {
+              agentName: agent.label || agent.topic || 'agent',
+              agentId: agent.sid.slice(0, 8),
+              state: 'BLOCKED',
+              blockedOn,
+              detectedAt: Date.now(),
+              autoApproved: false,
+            };
+            blockerAlerts.set(key, alert);
+            newBlockers.push(alert);
+
+            // Log the blocker alert for debugging
+            console.log(`[blocker-detected] ${alert.agentName}: ${blockedOn}`);
+          }
         }
       }
 
@@ -1047,9 +1171,16 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
       }
     }
 
+    // Cleanup state for agents that have terminated
+    for (const [key, _state] of agentLastState.entries()) {
+      if (!currentAgentKeys.has(key)) {
+        cleanupAgentState(key);
+      }
+    }
+
     return newBlockers;
   } catch (e) {
-    // Silently fail if getAgents() is unavailable
+    console.error('[monitor-blockers-error]', (e as Error).message.slice(0, 160));
     return [];
   }
 }
