@@ -820,7 +820,7 @@ function loadAutoApprovalConfig(): AutoApprovalConfig {
  * Check if a permission prompt text matches a safe operation (whitelist).
  * Returns: { isSafe: boolean, operation?: string }
  */
-function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string): { isSafe: boolean; operation?: string } {
+export function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string): { isSafe: boolean; operation?: string } {
   const config = loadAutoApprovalConfig();
   if (!config.enabled) return { isSafe: false };
 
@@ -969,7 +969,7 @@ function formatStatusBubble(bubble: MessageBubble): string {
  * Monitor agent states and detect blocked agents. Called every 5-10 seconds by watch().
  * Returns blockers that need immediate user attention (excludes auto-approved).
  */
-async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
+export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
   try {
     const agents = await getAgents();
     const newBlockers: BlockerAlert[] = [];
@@ -1134,7 +1134,7 @@ export function getBlockerStatus(): string {
 /**
  * Update message timeouts. Called by watch() every 5-10 seconds.
  */
-function updateMessageTimeouts() {
+export function updateMessageTimeouts() {
   const now = Date.now();
   for (const [_k, bubble] of messageBubbles.entries()) {
     if (bubble.status === 'sent' && now > bubble.timeoutAt) {
