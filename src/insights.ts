@@ -803,19 +803,25 @@ interface AutoApprovalConfig {
 
 let autoApprovalConfig: AutoApprovalConfig | null = null;
 
+const DEFAULT_CONFIG: AutoApprovalConfig = {
+  enabled: false,
+  safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } },
+  monitoring: { blockersCheckIntervalMs: 5000, messageTimeoutMs: 30000, autoApprovalReportFormat: '✅ Auto-approved: {operation}', blockerTimeoutMs: 300000, maxApprovalsPerMinute: 10 }
+};
+
 function loadAutoApprovalConfig(): AutoApprovalConfig {
   if (autoApprovalConfig) return autoApprovalConfig;
 
   try {
     const configPath = path.join(path.dirname(import.meta.dirname), 'orchestrator.config.json');
     const raw = fs.readFileSync(configPath, 'utf-8');
-    autoApprovalConfig = JSON.parse(raw).autoApproval || { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } } };
+    autoApprovalConfig = JSON.parse(raw).autoApproval || DEFAULT_CONFIG;
   } catch (e) {
     // Config file not found or invalid; disable auto-approval
-    autoApprovalConfig = { enabled: false, safeOperations: { bashPatterns: [], fileWritePatterns: [], risky: { bashPatterns: [], filePatterns: [] } }, monitoring: { blockersCheckIntervalMs: 5000, messageTimeoutMs: 30000, autoApprovalReportFormat: '✅ Auto-approved: {operation}', blockerTimeoutMs: 300000, maxApprovalsPerMinute: 10 } };
+    autoApprovalConfig = DEFAULT_CONFIG;
   }
 
-  return autoApprovalConfig;
+  return autoApprovalConfig!;  // Non-null assertion: always set above
 }
 
 // ---- Rate Limiting & Timeout Management
