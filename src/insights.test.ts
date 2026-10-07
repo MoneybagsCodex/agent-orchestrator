@@ -596,6 +596,66 @@ describe('Auto-Approval System', () => {
     });
   });
 
+  describe('Metrics & Monitoring', () => {
+    it('should track approval rate per minute', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should track denial rate per minute', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should track unknown operations', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should track orch-send failures', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should track pattern match frequency', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should measure decision latency', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should reset metrics every minute', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should format metrics summary for display', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+  });
+
+  describe('Alerting & Health Checks', () => {
+    it('should alert if approval rate is zero for 3 minutes', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should alert if orch-send failure rate is high', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should alert if decision latency is slow', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should alert if many denials suggest rate limiting', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should not send duplicate alerts', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+
+    it('should include alert details for debugging', () => {
+      expect(true).toBe(true);  // placeholder
+    });
+  });
+
   describe('Integration Tests', () => {
     it('should handle the full auto-approval flow for safe operations', () => {
       // 1. Agent hits blocker

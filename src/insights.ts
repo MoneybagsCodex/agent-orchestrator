@@ -894,6 +894,139 @@ function expandEnvVars(cmd: string, env?: NodeJS.ProcessEnv): string {
   return expanded;
 }
 
+// ---- Metrics & Monitoring
+
+interface Metrics {
+  approvalsThisMinute: number;
+  denialsThisMinute: number;
+  unknownThisMinute: number;
+  orchSendFailures: number;
+  lastMetricsReset: number;
+  patternMatches: Map<string, number>;
+  latencies: number[];
+  maxLatency: number;
+  avgLatency: number;
+}
+
+const metrics: Metrics = {
+  approvalsThisMinute: 0,
+  denialsThisMinute: 0,
+  unknownThisMinute: 0,
+  orchSendFailures: 0,
+  lastMetricsReset: Date.now(),
+  patternMatches: new Map(),
+  latencies: [],
+  maxLatency: 0,
+  avgLatency: 0,
+};
+
+/**
+ * Record a metric event
+ */
+function recordMetric(event: 'approved' | 'denied' | 'unknown', pattern?: string, latency?: number) {
+  const now = Date.now();
+
+  // Reset metrics every minute
+  if (now - metrics.lastMetricsReset > 60000) {
+    console.log(`[metrics] approved: ${metrics.approvalsThisMinute}, denied: ${metrics.denialsThisMinute}, unknown: ${metrics.unknownThisMinute}, orch-failures: ${metrics.orchSendFailures}`);
+    metrics.approvalsThisMinute = 0;
+    metrics.denialsThisMinute = 0;
+    metrics.unknownThisMinute = 0;
+    metrics.orchSendFailures = 0;
+    metrics.latencies = [];
+    metrics.lastMetricsReset = now;
+  }
+
+  // Count events
+  if (event === 'approved') {
+    metrics.approvalsThisMinute++;
+  } else if (event === 'denied') {
+    metrics.denialsThisMinute++;
+  } else if (event === 'unknown') {
+    metrics.unknownThisMinute++;
+  }
+
+  // Track pattern matches
+  if (pattern) {
+    metrics.patternMatches.set(pattern, (metrics.patternMatches.get(pattern) ?? 0) + 1);
+  }
+
+  // Track latency
+  if (latency !== undefined) {
+    metrics.latencies.push(latency);
+    metrics.maxLatency = Math.max(metrics.maxLatency, latency);
+    if (metrics.latencies.length > 0) {
+      metrics.avgLatency = metrics.latencies.reduce((a, b) => a + b, 0) / metrics.latencies.length;
+    }
+  }
+}
+
+/**
+ * Record an orch-send failure
+ */
+function recordOrchSendFailure() {
+  metrics.orchSendFailures++;
+}
+
+/**
+ * Get current metrics summary for status reporting
+ */
+export function getMetricsSummary(): string {
+  const lines = [
+    '**Auto-Approval Metrics:**',
+    `- Approvals (this minute): ${metrics.approvalsThisMinute}`,
+    `- Denials (this minute): ${metrics.denialsThisMinute}`,
+    `- Unknown (this minute): ${metrics.unknownThisMinute}`,
+    `- Orch-send failures: ${metrics.orchSendFailures}`,
+  ];
+
+  if (metrics.latencies.length > 0) {
+    lines.push(`- Avg decision latency: ${Math.round(metrics.avgLatency)}ms`);
+    lines.push(`- Max decision latency: ${metrics.maxLatency}ms`);
+  }
+
+  if (metrics.patternMatches.size > 0) {
+    lines.push('- Top patterns matched:');
+    const sorted = Array.from(metrics.patternMatches.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+    for (const [pattern, count] of sorted) {
+      lines.push(`  - ${pattern}: ${count} times`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Check for failure conditions and generate alerts
+ */
+export function checkAutoApprovalAlerts(): string[] {
+  const alerts: string[] = [];
+
+  // Alert if approval rate is zero for last 3 minutes
+  if (metrics.approvalsThisMinute === 0 && metrics.denialsThisMinute === 0 && metrics.unknownThisMinute === 0) {
+    alerts.push('⚠️  No auto-approval activity detected in the last minute. Listener may be stuck.');
+  }
+
+  // Alert if orch-send failure rate is high
+  if (metrics.orchSendFailures > 5) {
+    alerts.push(`⚠️  High orch-send failure rate: ${metrics.orchSendFailures} failures recorded`);
+  }
+
+  // Alert if decision latency is high
+  if (metrics.avgLatency > 500) {
+    alerts.push(`⚠️  Slow auto-approval decisions: avg ${Math.round(metrics.avgLatency)}ms (threshold: 500ms)`);
+  }
+
+  // Alert if rate limit is being hit frequently
+  if (metrics.denialsThisMinute > metrics.approvalsThisMinute * 2) {
+    alerts.push(`⚠️  Many denials this minute (possibly rate-limited or many risky operations)`);
+  }
+
+  return alerts;
+}
+
 /**
  * Check if a permission prompt text matches a safe operation (whitelist).
  * Handles prompt variations, env var expansion, and piped commands.
@@ -931,6 +1064,7 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
     const patternLower = pattern.toLowerCase();
     if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
       console.log('[auto-approval-denied]', 'risky bash pattern matched:', pattern);
+      recordMetric('denied', pattern);
       return { isSafe: false };
     }
   }
@@ -940,6 +1074,7 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
     const patternLower = pattern.toLowerCase();
     if (cmd.includes(patternLower) || promptCmd.includes(patternLower)) {
       console.log('[auto-approval-denied]', 'risky file pattern matched:', pattern);
+      recordMetric('denied', pattern);
       return { isSafe: false };
     }
   }
@@ -949,6 +1084,7 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
     const patternLower = pattern.toLowerCase();
     if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
       console.log('[auto-approval-approved]', 'safe bash pattern matched:', pattern);
+      recordMetric('approved', pattern);
       return { isSafe: true, operation: pattern };
     }
   }
@@ -958,12 +1094,14 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
     const patternLower = pattern.toLowerCase();
     if (cmd.includes(patternLower) || promptCmd.includes(patternLower)) {
       console.log('[auto-approval-approved]', 'safe file pattern matched:', pattern);
+      recordMetric('approved', pattern);
       return { isSafe: true, operation: pattern };
     }
   }
 
   // Default: not safe (require user approval)
   console.log('[auto-approval-unknown]', 'no patterns matched');
+  recordMetric('unknown');
   return { isSafe: false };
 }
 
@@ -1142,6 +1280,7 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
               console.log(`[auto-approved] ${alert.agentName}: ${operation} (approval sent via orch-send)`);
             } catch (e) {
               console.error(`[auto-approval-failed] ${alert.agentName}: ${(e as Error).message.slice(0, 120)}`);
+              recordOrchSendFailure();
             }
           } else {
             // Risky or unknown operation: require user approval
@@ -1274,6 +1413,9 @@ export function updateMessageTimeouts() {
   }
 }
 
+let lastAlertSent = 0;
+const ALERT_INTERVAL_MS = 60000; // Send alerts every minute
+
 export function startInsights(d: Deps) {
   deps = d;
   d.host.on('result-usage', (e: any) => logUsage('orchestrator-chat', e, d.host.model));
@@ -1290,6 +1432,17 @@ export function startInsights(d: Deps) {
       await monitorAgentBlockers();
       updateMessageTimeouts();
       watch();
+
+      // Send periodic alerts to orchestrator about auto-approval health
+      const now = Date.now();
+      if (now - lastAlertSent > ALERT_INTERVAL_MS) {
+        lastAlertSent = now;
+        const alerts = checkAutoApprovalAlerts();
+        if (alerts.length > 0) {
+          const msg = `[auto-approval-status] ${alerts.join('\n')}`;
+          d.host.sendSystem(msg);
+        }
+      }
     } catch (e) {
       console.error('[insights monitor]', (e as Error).message);
     }

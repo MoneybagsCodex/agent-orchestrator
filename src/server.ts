@@ -19,7 +19,7 @@ import express from 'express';
 import { execFile } from 'child_process';
 import { OrchestratorHost } from './host';
 import { detectWork, detectCompletion, sameWork, type Detected, type Completion } from './autoplan';
-import { getAgents, costsSummary, orchSelf, orchSelfLine, readBudgets, setBudgets, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights, getBlockerStatus, trackSentMessage, updateMessageStatus } from './insights';
+import { getAgents, costsSummary, orchSelf, orchSelfLine, readBudgets, setBudgets, assistantMessagesFor, backfillDone, conversationFor, buildStatus, decide, quickAction, readStanding, addStanding, removeStanding, startInsights, getBlockerStatus, trackSentMessage, updateMessageStatus, getMetricsSummary, checkAutoApprovalAlerts } from './insights';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -230,6 +230,13 @@ app.post('/standing', (req, res) => {
   res.json({ standing: addStanding(text) });
 });
 app.delete('/standing/:id', (req, res) => { removeStanding(req.params.id); res.json({ ok: true }); });
+
+/** Auto-approval metrics and alerts. */
+app.get('/metrics', (_req, res) => {
+  const metrics = getMetricsSummary();
+  const alerts = checkAutoApprovalAlerts();
+  res.json({ metrics, alerts, alertCount: alerts.length });
+});
 
 /**
  * GET /history — the orchestrator conversation rebuilt from its Claude transcript, so the UI can
