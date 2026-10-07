@@ -96,5 +96,83 @@
     "blockerTimeoutMs": 300000,
     "maxApprovalsPerMinute": 10,
     "description": "Auto-approval monitoring configuration"
+  },
+  "errorRecovery": {
+    "enabled": true,
+    "description": "Intelligent error categorization and recovery. Maps errors to TRANSIENT/PERMANENT/AGENT_SPECIFIC/SYSTEM/USER categories with appropriate retry and recovery strategies.",
+    "categorization": {
+      "transientTimeoutMs": 30000,
+      "description": "Errors without response in 30s are considered transient (network issue)"
+    },
+    "retryPolicies": {
+      "TRANSIENT": {
+        "maxRetries": 4,
+        "backoffMs": 500,
+        "backoffMultiplier": 2,
+        "jitterFactor": 0.3,
+        "maxBackoffMs": 32000,
+        "timeoutMs": 30000,
+        "description": "Fast retries for network glitches, API timeouts, rate limits"
+      },
+      "PERMANENT": {
+        "maxRetries": 0,
+        "backoffMs": 0,
+        "backoffMultiplier": 1,
+        "jitterFactor": 0,
+        "maxBackoffMs": 0,
+        "timeoutMs": 30000,
+        "description": "No retry; escalate immediately (file not found, permission denied, etc.)"
+      },
+      "AGENT_SPECIFIC": {
+        "maxRetries": 2,
+        "backoffMs": 1000,
+        "backoffMultiplier": 1.5,
+        "jitterFactor": 0.2,
+        "maxBackoffMs": 10000,
+        "timeoutMs": 15000,
+        "description": "Slower retries for agent-specific issues (may need state changes)"
+      },
+      "SYSTEM": {
+        "maxRetries": 1,
+        "backoffMs": 2000,
+        "backoffMultiplier": 1,
+        "jitterFactor": 0,
+        "maxBackoffMs": 2000,
+        "timeoutMs": 60000,
+        "description": "Single retry for system errors (often need manual intervention)"
+      },
+      "USER": {
+        "maxRetries": 0,
+        "backoffMs": 0,
+        "backoffMultiplier": 1,
+        "jitterFactor": 0,
+        "maxBackoffMs": 0,
+        "timeoutMs": 30000,
+        "description": "No retry; ask user for clarification or decision"
+      }
+    },
+    "circuitBreaker": {
+      "enabled": true,
+      "failureThreshold": 5,
+      "failureWindow": 60000,
+      "recoveryTimeout": 30000,
+      "description": "Open circuit after 5 failures in 60s window; try recovery after 30s cooldown"
+    },
+    "budgets": {
+      "maxErrorsPerMinute": 100,
+      "maxRetriesPerHour": 1000,
+      "description": "If exceeded, enable degraded mode"
+    },
+    "recovery": {
+      "rollbackTimeout": 10000,
+      "description": "Rollback must complete within 10s or abort"
+    },
+    "patterns": {
+      "TRANSIENT": ["rate_limit", "429", "overloaded", "503", "timeout", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAGAIN", "temporarily unavailable", "502", "504"],
+      "PERMANENT": ["permission denied", "EACCES", "file not found", "ENOENT", "directory", "EISDIR", "already exists", "EEXIST", "EPERM", "invalid request", "401", "403", "404", "syntax error"],
+      "AGENT_SPECIFIC": ["tool not available", "unknown tool", "tool error", "timeout", "invalid context", "agent crashed", "not responding", "message refused"],
+      "SYSTEM": ["out of memory", "ENOMEM", "disk full", "ENOSPC", "retries exceeded", "CPU overload", "killed", "SIGKILL", "circuit breaker"],
+      "USER": ["ambiguous", "unclear", "conflicting", "invalid", "missing parameter"]
+    }
   }
 }
