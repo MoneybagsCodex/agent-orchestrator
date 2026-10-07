@@ -50,18 +50,19 @@ async function demo() {
     iterations++;
 
     // Get ready phases
-    const { ready } = orchestrator.getNextPhasesToExecute();
+    const phases = orchestrator.getNextPhasesToExecute() || [];
 
-    if (ready.length === 0) {
+    if (phases.length === 0) {
       executionComplete = true;
       console.log('\n✓ Workflow complete!\n');
       break;
     }
 
     // Execute ready phases
-    for (const phase of ready) {
-      console.log(`\n⏳ Executing: ${phase.description} (Agent ${phase.assignedAgent?.id})`);
-      const result = orchestrator.executeStep(phase.id);
+    for (const phase of phases) {
+      const p = phase as any;
+      console.log(`\n⏳ Executing: ${p.description} (Agent ${p.assignedAgent?.id})`);
+      const result = orchestrator.executeStep(p.id);
 
       if (result.success) {
         console.log(`   ✓ Success`);
@@ -114,9 +115,9 @@ function printWorkflowState(orchestrator: Orchestrator) {
   console.log(`\nCurrent Progress: ${state.progress.completed}/${state.progress.total} (${state.progress.percentComplete}%)`);
   console.log(`Risk Level: ${state.riskLevel}`);
 
-  const { ready, parallel } = orchestrator.getNextPhasesToExecute();
-  if (ready.length > 0) {
-    console.log(`Ready to execute: ${ready.map((p) => p.description).join(', ')}`);
+  const phases = orchestrator.getNextPhasesToExecute() || [];
+  if (phases.length > 0) {
+    console.log(`Ready to execute: ${phases.map((p: any) => p.description).join(', ')}`);
   } else {
     console.log('Awaiting approvals or workflow complete');
   }
