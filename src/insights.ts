@@ -827,29 +827,41 @@ function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: str
   const prompt = promptText.toLowerCase();
   const cmd = (agentLastCommand || '').toLowerCase();
 
-  // Check if this looks like a bash operation
-  if (prompt.includes('allow') && (prompt.includes('bash') || prompt.includes('command') || prompt.includes('run'))) {
-    for (const pattern of config.safeOperations.bashPatterns) {
-      if (cmd.includes(pattern.toLowerCase())) return { isSafe: true, operation: pattern };
-    }
-    // If it's a bash command, check risky patterns
-    for (const pattern of config.safeOperations.risky.bashPatterns) {
-      if (cmd.includes(pattern.toLowerCase())) return { isSafe: false };
+  // Log for debugging
+  console.log('[auto-approval-check]', { prompt: prompt.slice(0, 80), cmd: cmd.slice(0, 80) });
+
+  // Always check bash patterns first (don't require specific keywords in prompt)
+  for (const pattern of config.safeOperations.risky.bashPatterns) {
+    if (cmd.includes(pattern.toLowerCase())) {
+      console.log('[auto-approval-denied]', 'risky pattern matched:', pattern);
+      return { isSafe: false };
     }
   }
 
-  // Check if this looks like a file write operation
-  if (prompt.includes('allow') && (prompt.includes('write') || prompt.includes('file') || prompt.includes('create'))) {
-    for (const pattern of config.safeOperations.fileWritePatterns) {
-      if (cmd.includes(pattern.toLowerCase())) return { isSafe: true, operation: pattern };
+  for (const pattern of config.safeOperations.bashPatterns) {
+    if (cmd.includes(pattern.toLowerCase())) {
+      console.log('[auto-approval-approved]', 'safe bash pattern matched:', pattern);
+      return { isSafe: true, operation: pattern };
     }
-    // Check risky file patterns
-    for (const pattern of config.safeOperations.risky.filePatterns) {
-      if (cmd.includes(pattern.toLowerCase())) return { isSafe: false };
+  }
+
+  // Check file write patterns
+  for (const pattern of config.safeOperations.risky.filePatterns) {
+    if (cmd.includes(pattern.toLowerCase())) {
+      console.log('[auto-approval-denied]', 'risky file pattern matched:', pattern);
+      return { isSafe: false };
+    }
+  }
+
+  for (const pattern of config.safeOperations.fileWritePatterns) {
+    if (cmd.includes(pattern.toLowerCase())) {
+      console.log('[auto-approval-approved]', 'safe file pattern matched:', pattern);
+      return { isSafe: true, operation: pattern };
     }
   }
 
   // Default: not safe (require user approval)
+  console.log('[auto-approval-unknown]', 'no patterns matched');
   return { isSafe: false };
 }
 
@@ -962,11 +974,18 @@ async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
     const agents = await getAgents();
     const newBlockers: BlockerAlert[] = [];
 
+    console.log(`[listener-running] Monitoring ${agents.length} agents`);
+
     for (const agent of agents) {
       const key = `${agent.sid}:${agent.pid}`;
       const lastState = agentLastState.get(key);
       const currentState = agent.state || 'UNKNOWN';
       const blockedOn = agent.blockedOn || agent.prompt || '';
+
+      // Debug: log all agents
+      if (currentState === 'BLOCKED') {
+        console.log(`[listener-checking] Agent: ${agent.label || agent.topic || 'unknown'}, LastCmd: ${lastState?.lastCmd || 'none'}`);
+      }
 
       // Detect state transition to BLOCKED
       if (currentState === 'BLOCKED' && (!lastState || lastState.state !== 'BLOCKED')) {
