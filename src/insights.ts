@@ -969,7 +969,35 @@ function recordOrchSendFailure() {
 }
 
 /**
- * Get current metrics summary for status reporting
+ * Format current auto-approval metrics for display and logging.
+ *
+ * Returns a human-readable summary including:
+ * - Approval/denial/unknown counts for this minute
+ * - Orch-send failure count
+ * - Top 5 most-matched patterns (safe and risky)
+ * - Average/max decision latency in milliseconds
+ *
+ * Used by:
+ * - Console logging every 60 seconds with [metrics] tag
+ * - GET /metrics API endpoint
+ * - Dashboard status reporting
+ *
+ * @returns Formatted metrics summary (markdown text)
+ *
+ * @example
+ * const summary = getMetricsSummary();
+ * console.log(summary);
+ * // Output:
+ * // **Auto-Approval Metrics:**
+ * // - Approvals (this minute): 12
+ * // - Denials (this minute): 3
+ * // - Unknown (this minute): 1
+ * // - Orch-send failures: 0
+ * // - Avg decision latency: 2ms
+ * // - Max decision latency: 8ms
+ * // - Top patterns matched:
+ * //   - git: 12 times
+ * //   - npm: 3 times
  */
 export function getMetricsSummary(): string {
   const lines = [
@@ -999,7 +1027,34 @@ export function getMetricsSummary(): string {
 }
 
 /**
- * Check for failure conditions and generate alerts
+ * Detect and report auto-approval system health issues.
+ *
+ * Checks for failure conditions:
+ * 1. Zero activity (no approvals/denials/unknowns) for 3+ minutes
+ *    → Suggests listener is stuck or not running
+ *
+ * 2. High orch-send failure rate (>5 failures/minute)
+ *    → Suggests approval delivery is broken
+ *
+ * 3. Slow decision latency (avg >500ms)
+ *    → Suggests checkAutoApprovalEligibility() is slow or blocked
+ *
+ * 4. High denial rate (denials > approvals × 2)
+ *    → Suggests rate limiting, missing patterns, or many risky ops
+ *
+ * Used by:
+ * - Periodic alerts sent to orchestrator every 60 seconds
+ * - GET /metrics API endpoint
+ * - System health monitoring
+ *
+ * @returns Array of alert strings (empty if all systems healthy)
+ *
+ * @example
+ * const alerts = checkAutoApprovalAlerts();
+ * if (alerts.length > 0) {
+ *   console.log('⚠️ Auto-approval alerts:', alerts);
+ *   // Send to orchestrator via system message
+ * }
  */
 export function checkAutoApprovalAlerts(): string[] {
   const alerts: string[] = [];
@@ -1028,9 +1083,52 @@ export function checkAutoApprovalAlerts(): string[] {
 }
 
 /**
- * Check if a permission prompt text matches a safe operation (whitelist).
- * Handles prompt variations, env var expansion, and piped commands.
- * Returns: { isSafe: boolean, operation?: string }
+ * Check if a permission prompt text matches a safe or risky operation pattern.
+ *
+ * Implements fail-safe pattern matching:
+ * 1. Extract command from permission prompt (handles variations)
+ * 2. Expand environment variables ($VAR and ${VAR} syntax)
+ * 3. Check RISKY patterns FIRST (if matched → deny immediately)
+ * 4. Check SAFE patterns (if matched → approve)
+ * 5. Unknown → deny (conservative default)
+ *
+ * Handles edge cases:
+ * - Piped commands: "git log | grep fix" → extracts "git log"
+ * - Commands with flags: "npm install --save-dev" → matches "npm"
+ * - Env var expansion: "git commit -m $MESSAGE" → "git commit -m <value>"
+ * - Prompt variations: multiple formats all correctly extracted
+ * - Case insensitivity: "GIT COMMIT" matches "git" pattern
+ *
+ * @param promptText - Permission prompt text from agent (e.g., "Allow 'git commit'?")
+ * @param agentLastCommand - Last command executed by the agent (optional)
+ * @param processEnv - Process environment for variable expansion (optional, defaults to process.env)
+ *
+ * @returns { isSafe: true, operation: 'git' } if safe operation matched
+ * @returns { isSafe: false } if risky or unknown operation
+ *
+ * @example
+ * // Safe operation (git is in whitelist)
+ * const result = checkAutoApprovalEligibility(
+ *   "Allow 'git commit'?",
+ *   'git commit -m "fix"'
+ * );
+ * // Returns: { isSafe: true, operation: 'git' }
+ *
+ * @example
+ * // Risky operation (rm -rf is in risky list)
+ * const result = checkAutoApprovalEligibility(
+ *   "Allow 'rm -rf /path'?",
+ *   'rm -rf /path'
+ * );
+ * // Returns: { isSafe: false }
+ *
+ * @example
+ * // Unknown operation (no pattern matches)
+ * const result = checkAutoApprovalEligibility(
+ *   "Allow './custom-script.sh'?",
+ *   './custom-script.sh'
+ * );
+ * // Returns: { isSafe: false }
  */
 export function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string, processEnv?: NodeJS.ProcessEnv): { isSafe: boolean; operation?: string } {
   const config = loadAutoApprovalConfig();
@@ -1206,9 +1304,37 @@ function formatStatusBubble(bubble: MessageBubble): string {
 }
 
 /**
- * Monitor agent states and detect blocked agents. Called every 5-10 seconds by watch().
- * Handles: rate limiting, timeout cleanup, env var expansion, agent termination cleanup.
- * Returns blockers that need immediate user attention (excludes auto-approved).
+ * Continuously monitor all agents for permission prompts and auto-approve safe operations.
+ *
+ * Called every 5 seconds by the insights listener loop. Implements the core auto-approval workflow:
+ *
+ * For each agent:
+ * 1. Detect state transition to BLOCKED (new blocker)
+ * 2. Evaluate eligibility using checkAutoApprovalEligibility()
+ * 3. If SAFE:
+ *    - Send auto-approval via orch-send --key y
+ *    - Record metrics (approval count, pattern match)
+ *    - Log [auto-approved] event
+ * 4. If RISKY/UNKNOWN:
+ *    - Add to BlockerAlert list for user attention
+ *    - Log [blocker-detected] event
+ * 5. Clean up blockers when agent unblocks
+ * 6. Clean up stale state for terminated agents
+ *
+ * Handles:
+ * - Rate limiting: Max 10 approvals/minute (configurable)
+ * - Blocker timeout: Clear unresolved blockers after 5 minutes
+ * - Agent cleanup: Remove state when agent terminates
+ * - Env var expansion: Expand $VAR and ${VAR} in commands
+ *
+ * @returns BlockerAlert[] - Blockers requiring user attention (excludes auto-approved ones)
+ *
+ * @example
+ * // Called by listener loop every 5 seconds
+ * const blockers = await monitorAgentBlockers();
+ * if (blockers.length > 0) {
+ *   console.log('User attention needed:', blockers);
+ * }
  */
 export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
   try {

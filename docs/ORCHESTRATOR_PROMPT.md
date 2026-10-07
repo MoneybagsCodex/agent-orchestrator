@@ -1589,6 +1589,20 @@ This background loop effectively puts the orchestrator in **semi-autonomous mode
 
 Users can disable auto-approval by setting `autoApproval.enabled: false` in orchestrator.config.json.
 
+### Complete Auto-Approval Guide
+
+For comprehensive documentation including configuration, troubleshooting, adding safe patterns, performance notes, and security considerations, see **[AUTO_APPROVAL_SYSTEM.md](./AUTO_APPROVAL_SYSTEM.md)**.
+
+Key sections:
+- **Architecture**: Component overview and data flow
+- **Configuration**: Detailed explanation of each setting in orchestrator.config.json
+- **Matching Logic**: Examples of safe/risky/unknown operations
+- **Features**: Env var expansion, rate limiting, blocker timeout, agent cleanup
+- **Metrics**: Tracking approvals/denials, latency, pattern frequency
+- **Alerting**: Health checks and failure detection
+- **Troubleshooting**: Debug steps for common issues
+- **Best Practices**: Guidelines for extending the whitelist
+
 ---
 
 ## Checklist: Is the Orchestrator Working Correctly?

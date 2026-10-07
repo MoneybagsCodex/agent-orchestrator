@@ -92,6 +92,9 @@
   "monitoring": {
     "blockersCheckIntervalMs": 5000,
     "messageTimeoutMs": 30000,
-    "autoApprovalReportFormat": "✅ Auto-approved: {operation}"
+    "autoApprovalReportFormat": "✅ Auto-approved: {operation}",
+    "blockerTimeoutMs": 300000,
+    "maxApprovalsPerMinute": 10,
+    "description": "Auto-approval monitoring configuration"
   }
 }
