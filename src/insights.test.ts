@@ -200,6 +200,17 @@ describe('Auto-Approval System', () => {
         expect(check('lsof -i')).toBe(false);
       });
 
+      it('safe file patterns respect path boundaries', () => {
+        expect(check('./mydocs/run.sh')).toBe(false);
+        expect(check('./evil.sh docs/a.md')).toBe(false);
+        expect(check('docs/a.md')).toBe(true);
+      });
+
+      it('risky file patterns stay substring-based (fail-safe)', () => {
+        expect(check('cat prod.env')).toBe(false);
+        expect(check('cat my.pem')).toBe(false);
+      });
+
       it('still approves fully-safe chains', () => {
         expect(check('git status && git diff')).toBe(true);
         expect(check('git log | grep fix')).toBe(true);

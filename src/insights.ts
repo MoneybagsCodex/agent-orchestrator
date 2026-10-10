@@ -1164,7 +1164,15 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
   // Every segment must independently be safe; any risky segment denies.
   const segments = cmd.split(/&&|\|\||[;&|\n`()]|\$\(/).map(s => s.trim()).filter(Boolean);
   const matchesPattern = (text: string, patternLower: string): boolean =>
-    new RegExp(`(?<![\\w-])${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
+    new RegExp(
+      `${/^\w/.test(patternLower) ? '(?<![\\w-])' : ''}${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${/\w$/.test(patternLower) ? '(?![\\w-])' : ''}`
+    ).test(text);
+
+  // A safe path only counts when the text is a bare path or starts with a known-safe command ("./evil.sh docs/a.md" is not safe).
+  const fileTextOk = (t: string): boolean => {
+    const first = t.trim().split(/\s+/)[0] || '';
+    return !/\s/.test(t.trim()) || config.safeOperations.bashPatterns.some(p => matchesPattern(first, p.toLowerCase()));
+  };
 
   // Always check risky patterns FIRST (fail-safe: risky takes precedence)
   for (const pattern of config.safeOperations.risky.bashPatterns) {
@@ -1203,9 +1211,10 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
   }
 
   // Check safe file write patterns
-  for (const pattern of config.safeOperations.fileWritePatterns) {
+  // Skipped for chained commands: an unmatched segment must never be approved via a path in another segment.
+  for (const pattern of segments.length > 1 ? [] : config.safeOperations.fileWritePatterns) {
     const patternLower = pattern.toLowerCase();
-    if (cmd.includes(patternLower) || promptCmd.includes(patternLower)) {
+    if (fileTextOk(cmd) && matchesPattern(cmd, patternLower) || fileTextOk(promptCmd) && matchesPattern(promptCmd, patternLower)) {
       console.log('[auto-approval-approved]', 'safe file pattern matched:', pattern);
       recordMetric('approved', pattern);
       return { isSafe: true, operation: pattern };

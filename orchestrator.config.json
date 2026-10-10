@@ -84,7 +84,9 @@
           "password",
           "token",
           "credential",
-          ".env"
+          ".env",
+          ".key",
+          ".pem"
         ]
       }
     }
