@@ -182,6 +182,30 @@ describe('Auto-Approval System', () => {
   });
 
   describe('checkAutoApprovalEligibility()', () => {
+    describe('Command chaining / substring injection', () => {
+      const check = (cmd: string) => checkAutoApprovalEligibility(`Allow '${cmd}'?`, cmd).isSafe;
+
+      it('denies risky command chained after a safe one', () => {
+        expect(check('git status && rm -rf /')).toBe(false);
+        expect(check('git status; sudo ls')).toBe(false);
+      });
+
+      it('denies unknown command chained after a safe one', () => {
+        expect(check('git status && ./evil.sh')).toBe(false);
+        expect(check('echo $(./evil.sh)')).toBe(false);
+      });
+
+      it('does not match patterns as substrings of other words', () => {
+        expect(check('./digit-wiper.sh')).toBe(false);
+        expect(check('lsof -i')).toBe(false);
+      });
+
+      it('still approves fully-safe chains', () => {
+        expect(check('git status && git diff')).toBe(true);
+        expect(check('git log | grep fix')).toBe(true);
+      });
+    });
+
     describe('Safe Bash Operations', () => {
       it('should approve git commit commands', () => {
         const result = checkAutoApprovalEligibility(

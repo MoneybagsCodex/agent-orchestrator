@@ -1160,13 +1160,16 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
   // Log for debugging
   console.log('[auto-approval-check]', { prompt: promptCmd.slice(0, 80), cmd: cmd.slice(0, 80) });
 
-  // Check the primary command (first word for piped operations like "git log | grep fix")
-  const primaryCmd = cmd.split(/[|;]/).shift()?.trim() || '';
+  // Split chained/substituted commands ("a && b", "a; b", "a | b", "$(b)", "`b`") into segments.
+  // Every segment must independently be safe; any risky segment denies.
+  const segments = cmd.split(/&&|\|\||[;&|\n`()]|\$\(/).map(s => s.trim()).filter(Boolean);
+  const matchesPattern = (text: string, patternLower: string): boolean =>
+    new RegExp(`(?<![\\w-])${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
 
   // Always check risky patterns FIRST (fail-safe: risky takes precedence)
   for (const pattern of config.safeOperations.risky.bashPatterns) {
     const patternLower = pattern.toLowerCase();
-    if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
+    if (matchesPattern(cmd, patternLower) || segments.some(s => matchesPattern(s, patternLower))) {
       console.log('[auto-approval-denied]', 'risky bash pattern matched:', pattern);
       recordMetric('denied', pattern);
       return { isSafe: false };
@@ -1184,12 +1187,18 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
   }
 
   // Then check safe bash patterns
-  for (const pattern of config.safeOperations.bashPatterns) {
-    const patternLower = pattern.toLowerCase();
-    if (primaryCmd.includes(patternLower) || cmd.includes(patternLower)) {
-      console.log('[auto-approval-approved]', 'safe bash pattern matched:', pattern);
-      recordMetric('approved', pattern);
-      return { isSafe: true, operation: pattern };
+  // (all segments must match a safe pattern, so "git status && unknown-tool" is not approved)
+  if (segments.length > 0) {
+    let firstMatch: string | undefined;
+    const allSafe = segments.every(seg => {
+      const hit = config.safeOperations.bashPatterns.find(p => matchesPattern(seg, p.toLowerCase()));
+      if (hit && !firstMatch) firstMatch = hit;
+      return !!hit;
+    });
+    if (allSafe && firstMatch) {
+      console.log('[auto-approval-approved]', 'safe bash pattern matched:', firstMatch);
+      recordMetric('approved', firstMatch);
+      return { isSafe: true, operation: firstMatch };
     }
   }
 
