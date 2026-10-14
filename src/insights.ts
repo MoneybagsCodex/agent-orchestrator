@@ -1243,7 +1243,13 @@ export interface MessageBubble {
 const messageBubbles = new Map<string, MessageBubble>();
 
 // Track agent state transitions to detect blockers
-const agentLastState = new Map<string, { state: string; since: number; blockedOn?: string; lastCmd?: string }>();
+// The command a permission prompt asks to run, taken from the quoted text in the prompt.
+function commandUnderReview(prompt: string): string | undefined {
+  const m = prompt.match(/['"`]([^'"`]+)['"`]/);
+  return m ? m[1] : undefined;
+}
+
+const agentLastState = new Map<string, { state: string; since: number; blockedOn?: string }>();
 
 // Emit alert when agent becomes blocked
 export interface BlockerAlert {
@@ -1380,7 +1386,7 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
 
       // Debug: log blocked agents
       if (currentState === 'BLOCKED') {
-        console.log(`[listener-checking] Agent: ${agent.label || agent.topic || 'unknown'}, LastCmd: ${lastState?.lastCmd || 'none'}`);
+        console.log(`[listener-checking] Agent: ${agent.label || agent.topic || 'unknown'}`);
       }
 
       // Detect state transition to BLOCKED
@@ -1400,7 +1406,7 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
           newBlockers.push(alert);
         } else {
           // Check if this is a safe operation that can be auto-approved
-          const { isSafe, operation } = checkAutoApprovalEligibility(blockedOn, lastState?.lastCmd, process.env);
+          const { isSafe, operation } = checkAutoApprovalEligibility(blockedOn, commandUnderReview(blockedOn), process.env);
 
           if (isSafe && operation) {
             // Auto-approve safe operation
@@ -1452,7 +1458,7 @@ export async function monitorAgentBlockers(): Promise<BlockerAlert[]> {
       }
 
       // Update state tracking
-      agentLastState.set(key, { state: currentState, since: Date.now(), blockedOn, lastCmd: agent.lastCmd });
+      agentLastState.set(key, { state: currentState, since: Date.now(), blockedOn });
 
       // Clear old blockers if agent unblocks
       if (currentState !== 'BLOCKED' && blockerAlerts.has(key)) {
