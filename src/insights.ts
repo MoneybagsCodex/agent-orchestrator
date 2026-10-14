@@ -1587,10 +1587,14 @@ export function startInsights(d: Deps) {
       const now = Date.now();
       if (now - lastAlertSent > ALERT_INTERVAL_MS) {
         lastAlertSent = now;
-        const alerts = checkAutoApprovalAlerts();
-        if (alerts.length > 0) {
-          const msg = `[auto-approval-status] ${alerts.join('\n')}`;
-          d.host.sendSystem(msg);
+        // Zero activity with no agents is expected, not a listener failure
+        const agents = await getAgents();
+        if (agents.length > 0) {
+          const alerts = checkAutoApprovalAlerts();
+          if (alerts.length > 0) {
+            const msg = `[auto-approval-status] ${alerts.join('\n')}`;
+            d.host.sendSystem(msg);
+          }
         }
       }
     } catch (e) {
