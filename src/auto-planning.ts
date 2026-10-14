@@ -227,8 +227,8 @@ export class DependencyAnalyzer {
   /**
    * Infer dependencies between steps based on text and keywords
    */
-  analyzeDependencies(steps: PlanStep[]): Array<{ fromStepId: string; toStepId: string; type: string }> {
-    const dependencies: Array<{ fromStepId: string; toStepId: string; type: string }> = [];
+  analyzeDependencies(steps: PlanStep[]): Plan['dependencies'] {
+    const dependencies: Plan['dependencies'] = [];
 
     const blockingKeywords = /before|first|then|after|once|depends/i;
     const enhancingKeywords = /also|additionally|further|improves|enhances/i;

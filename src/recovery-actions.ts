@@ -4,8 +4,10 @@
  * Executes appropriate recovery based on error category and context
  */
 
-import { ErrorCategory } from './error-recovery';
 import { CircuitState } from './retry-backoff';
+
+export type RecoveryErrorCategory = 'TRANSIENT' | 'PERMANENT' | 'AGENT_SPECIFIC' | 'SYSTEM' | 'USER';
+type ErrorCategory = RecoveryErrorCategory;
 
 export enum RecoveryActionType {
   RETRY = 'retry',           // Already handled by Phase 3, included for completeness

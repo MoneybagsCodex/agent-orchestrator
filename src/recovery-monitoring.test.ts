@@ -10,8 +10,8 @@ import {
   RecoveryDashboard,
   RecoveryLogger,
   createRecoveryMonitoring,
-  type ErrorCategory,
 } from './recovery-monitoring';
+import { RecoveryActionType, type RecoveryErrorCategory as ErrorCategory } from './recovery-actions';
 
 describe('ErrorMetrics', () => {
   let metrics: ErrorMetrics;
@@ -394,13 +394,13 @@ describe('RecoveryLogger', () => {
   });
 
   it('logs recovery attempts', () => {
-    RecoveryLogger.recordRecoveryAttempt('FALLBACK', 1);
+    RecoveryLogger.recordRecoveryAttempt(RecoveryActionType.FALLBACK, 1);
     // Just verify no exception thrown
     expect(true).toBe(true);
   });
 
   it('logs recovery success', () => {
-    RecoveryLogger.recordRecoverySuccess('ROLLBACK', 500);
+    RecoveryLogger.recordRecoverySuccess(RecoveryActionType.ROLLBACK, 500);
     // Just verify no exception thrown
     expect(true).toBe(true);
   });

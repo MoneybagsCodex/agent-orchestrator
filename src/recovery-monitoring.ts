@@ -3,18 +3,8 @@
  * Tracks error metrics, recovery success rates, and health alerts
  */
 
-import { ErrorCategory } from './error-recovery';
 import { RecoveryActionType } from './recovery-actions';
-
-export interface ErrorMetrics {
-  totalErrors: number;
-  successfulRecoveries: number;
-  failedRecoveries: number;
-  recoverySuccessRate: number; // percentage
-  averageRecoveryLatencyMs: number;
-  circuitBreakerTrips: number;
-  currentErrorRate: number; // errors/minute
-}
+import type { RecoveryErrorCategory as ErrorCategory } from './recovery-actions';
 
 export interface CategoryMetrics {
   category: ErrorCategory;

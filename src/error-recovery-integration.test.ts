@@ -6,7 +6,8 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { categorizeError, type ErrorCategory } from './error-recovery';
-import { ExponentialBackoff, CircuitBreaker, RetryStrategy } from './retry-backoff';
+import { toRecoveryCategory, createErrorRecoveryExecutor } from './error-recovery-integration';
+import { ExponentialBackoff, CircuitBreaker, CircuitState, RetryStrategy } from './retry-backoff';
 import {
   RecoveryPlanBuilder,
   RecoveryActionType,
@@ -56,7 +57,7 @@ describe('End-to-End Error Recovery Pipeline', () => {
 
   // Test 1: Network Timeout → Categorized as TRANSIENT
   it('categorizes network timeout as TRANSIENT', () => {
-    const error = { code: 'ECONNREFUSED', message: 'Connection refused' };
+    const error = Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
     const record = categorizeError(error);
     expect(record.category).toBe('transient');
   });
@@ -72,7 +73,7 @@ describe('End-to-End Error Recovery Pipeline', () => {
   it('handles TRANSIENT error with retry and recovery', async () => {
     const error = { code: 'ETIMEDOUT', message: 'Connection timeout' };
     const record = categorizeError(error);
-    const category = record.category as any;
+    const category = toRecoveryCategory(record.category);
 
     metrics.recordError(category);
     metrics.recordRecoveryAttempt(category);
@@ -87,7 +88,7 @@ describe('End-to-End Error Recovery Pipeline', () => {
 
   // Test 4: Complete flow: PERMANENT error with escalation
   it('handles PERMANENT error with escalation', async () => {
-    const error = { code: 'EACCES', message: 'Permission denied' };
+    const error = Object.assign(new Error('Permission denied'), { code: 'EACCES' });
     const record = categorizeError(error);
 
     expect(record.category).toBe('permanent');
@@ -95,7 +96,7 @@ describe('End-to-End Error Recovery Pipeline', () => {
     const context: RecoveryContext = {
       operationName: 'read-file',
       error,
-      errorCategory: record.category,
+      errorCategory: toRecoveryCategory(record.category),
       attempt: 1,
     };
 
@@ -120,22 +121,22 @@ describe('End-to-End Error Recovery Pipeline', () => {
 
     const canExecute = circuitBreaker.canExecute();
     expect(canExecute).toBe(false);
-    expect(circuitBreaker.getState()).toBe('OPEN');
+    expect(circuitBreaker.getState().state).toBe(CircuitState.OPEN);
   });
 
   // Test 6: Metrics aggregation across multiple error categories
   it('aggregates metrics across multiple error categories', () => {
-    metrics.recordError('transient');
-    metrics.recordError('transient');
-    metrics.recordError('permanent');
-    metrics.recordError('agent-specific');
+    metrics.recordError('TRANSIENT');
+    metrics.recordError('TRANSIENT');
+    metrics.recordError('PERMANENT');
+    metrics.recordError('AGENT_SPECIFIC');
 
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoveryAttempt('permanent');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoveryAttempt('PERMANENT');
 
-    metrics.recordRecoverySuccess('transient', 100);
-    metrics.recordRecoverySuccess('transient', 200);
+    metrics.recordRecoverySuccess('TRANSIENT', 100);
+    metrics.recordRecoverySuccess('TRANSIENT', 200);
 
     const result = metrics.getMetrics();
 
@@ -147,11 +148,11 @@ describe('End-to-End Error Recovery Pipeline', () => {
   // Test 7: Health monitor detects degradation
   it('health monitor detects system degradation', () => {
     for (let i = 0; i < 15; i++) {
-      metrics.recordError('transient');
+      metrics.recordError('TRANSIENT');
     }
 
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoverySuccess('transient', 100);
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoverySuccess('TRANSIENT', 100);
 
     const rawMetrics = metrics.getMetrics();
     const alerts = monitor.checkHealth(rawMetrics);
@@ -162,8 +163,9 @@ describe('End-to-End Error Recovery Pipeline', () => {
 
   // Test 8: Dashboard correctly reports healthy status
   it('dashboard reports healthy status when metrics are normal', () => {
-    metrics.recordError('transient');
-    metrics.recordRecoverySuccess('transient', 100);
+    metrics.recordError('TRANSIENT');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoverySuccess('TRANSIENT', 100);
 
     const data = dashboard.getData();
 
@@ -180,11 +182,11 @@ describe('End-to-End Error Recovery Pipeline', () => {
     });
     const badDashboard = new RecoveryDashboard(metrics, badMonitor);
 
-    metrics.recordError('transient');
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoveryAttempt('transient');
-    metrics.recordRecoverySuccess('transient', 100);
+    metrics.recordError('TRANSIENT');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoveryAttempt('TRANSIENT');
+    metrics.recordRecoverySuccess('TRANSIENT', 100);
 
     const data = badDashboard.getData();
 
@@ -196,9 +198,9 @@ describe('End-to-End Error Recovery Pipeline', () => {
     const cache = new Map<string, any>();
     cache.set('agent-status', { status: 'cached' });
 
-    const error = { code: 'ETIMEDOUT', message: 'Network timeout' };
+    const error = Object.assign(new Error('Network timeout'), { code: 'ETIMEDOUT' });
     const record = categorizeError(error);
-    const category = record.category as any;
+    const category = toRecoveryCategory(record.category);
 
     metrics.recordError(category);
 
@@ -231,11 +233,11 @@ describe('End-to-End Error Recovery Pipeline', () => {
 
     const error = { code: 'ETIMEDOUT', message: 'Network timeout' };
     const record = categorizeError(error);
-    const category = record.category as any;
+    const category = toRecoveryCategory(record.category);
 
     RecoveryLogger.recordError(category, error as any, 'fetch-agents');
-    RecoveryLogger.recordRecoveryAttempt('RETRY', 1);
-    RecoveryLogger.recordRecoverySuccess('FALLBACK', 150);
+    RecoveryLogger.recordRecoveryAttempt(RecoveryActionType.RETRY, 1);
+    RecoveryLogger.recordRecoverySuccess(RecoveryActionType.FALLBACK, 150);
 
     const logOutput = consoleSpy.join('\n');
 
@@ -260,8 +262,9 @@ describe('End-to-End Error Recovery Pipeline', () => {
       },
     });
 
-    m.recordError('transient');
-    m.recordRecoverySuccess('transient', 100);
+    m.recordError('TRANSIENT');
+    m.recordRecoveryAttempt('TRANSIENT');
+    m.recordRecoverySuccess('TRANSIENT', 100);
 
     const data = d.getData();
 
@@ -286,12 +289,12 @@ describe('End-to-End Error Recovery Pipeline', () => {
   // Test 15: Complete recovery flow from error to dashboard display
   it('complete flow from error to dashboard visualization', async () => {
     // Step 1: Error occurs
-    const error = { code: 'ECONNREFUSED', message: 'Connection refused' };
+    const error = Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
 
     // Step 2: Categorize
     const record = categorizeError(error);
     expect(record.category).toBe('transient');
-    const category = record.category as any;
+    const category = toRecoveryCategory(record.category);
 
     // Step 3: Record metrics
     metrics.recordError(category);
@@ -322,7 +325,7 @@ describe('Performance & Scalability Tests', () => {
 
   // Performance Test 1: Latency of error categorization
   it('categorizes errors with <1ms latency', () => {
-    const error = { code: 'ECONNREFUSED', message: 'Connection refused' };
+    const error = Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
     const startTime = Date.now();
 
     for (let i = 0; i < 1000; i++) {
@@ -340,9 +343,9 @@ describe('Performance & Scalability Tests', () => {
     const startTime = Date.now();
 
     for (let i = 0; i < 1000; i++) {
-      metrics.recordError('transient');
-      metrics.recordRecoveryAttempt('transient');
-      metrics.recordRecoverySuccess('transient', 50 + (i % 100));
+      metrics.recordError('TRANSIENT');
+      metrics.recordRecoveryAttempt('TRANSIENT');
+      metrics.recordRecoverySuccess('TRANSIENT', 50 + (i % 100));
     }
 
     const totalTime = Date.now() - startTime;
@@ -380,8 +383,8 @@ describe('Performance & Scalability Tests', () => {
     const metrics_local = new ErrorMetrics();
 
     for (let i = 0; i < 10000; i++) {
-      metrics_local.recordError('transient');
-      metrics_local.recordRecoverySuccess('transient', 100);
+      metrics_local.recordError('TRANSIENT');
+      metrics_local.recordRecoverySuccess('TRANSIENT', 100);
 
       if (i % 1000 === 0) {
         const before = JSON.stringify(metrics_local).length;
@@ -427,5 +430,27 @@ describe('Error Recovery Configuration Tests', () => {
 
     // Should detect high error rate with custom threshold
     expect(alerts.some((a) => a.type === 'HIGH_ERROR_RATE')).toBe(true);
+  });
+});
+
+describe('Executor retry dispatch', () => {
+  it('retries a TRANSIENT error instead of failing on the first attempt', async () => {
+    const executor = createErrorRecoveryExecutor({
+      errorRecovery: {
+        retryPolicies: {
+          TRANSIENT: { maxRetries: 2, backoffMs: 1, backoffMultiplier: 1, maxBackoffMs: 1, jitterFactor: 0, timeoutMs: 1000 },
+        },
+      },
+    });
+
+    let calls = 0;
+    const result = await executor.execute(async () => {
+      calls++;
+      if (calls < 2) throw Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
+      return 'ok';
+    });
+
+    expect(result.success).toBe(true);
+    expect(calls).toBe(2);
   });
 });

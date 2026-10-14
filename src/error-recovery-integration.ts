@@ -5,16 +5,27 @@
 
 import {
   categorizeError,
-  ErrorCategory,
+  ErrorCategory as CategorizerCategory,
   getRetryPolicy as getErrorRetryPolicy,
-  type ErrorCategorization,
 } from './error-recovery';
 import {
   RetryStrategy,
   RetryStrategyRegistry,
   RetryPolicy,
-  type RetryStrategyConfig,
 } from './retry-backoff';
+import type { RecoveryErrorCategory as ErrorCategory } from './recovery-actions';
+
+const CATEGORY_KEYS: Record<CategorizerCategory, ErrorCategory> = {
+  [CategorizerCategory.TRANSIENT]: 'TRANSIENT',
+  [CategorizerCategory.PERMANENT]: 'PERMANENT',
+  [CategorizerCategory.AGENT_SPECIFIC]: 'AGENT_SPECIFIC',
+  [CategorizerCategory.SYSTEM]: 'SYSTEM',
+  [CategorizerCategory.USER]: 'USER',
+};
+
+export function toRecoveryCategory(category: CategorizerCategory): ErrorCategory {
+  return CATEGORY_KEYS[category];
+}
 
 /**
  * Error recovery executor: categorizes errors and applies appropriate retry strategy
@@ -53,14 +64,14 @@ export class ErrorRecoveryExecutor {
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       const categorization = categorizeError(lastError);
-      lastCategory = categorization.category;
+      lastCategory = toRecoveryCategory(categorization.category);
 
       // Get retry policy for this error category
-      const policy = this.strategies.get(categorization.category);
+      const policy = this.strategies.get(toRecoveryCategory(categorization.category));
       if (!policy) {
         return {
           success: false,
-          category: categorization.category,
+          category: toRecoveryCategory(categorization.category),
           attempts: 1,
           error: lastError,
         };
@@ -70,14 +81,14 @@ export class ErrorRecoveryExecutor {
       const result = await policy.execute(
         operation,
         (attempt, delay) => {
-          onRetry?.(attempt, delay, categorization.category, lastError!);
+          onRetry?.(attempt, delay, toRecoveryCategory(categorization.category), lastError!);
         }
       );
 
       return {
         success: result.success,
         result: result.result,
-        category: categorization.category,
+        category: toRecoveryCategory(categorization.category),
         attempts: result.attempts,
         error: result.lastError,
       };
@@ -126,7 +137,7 @@ export class ErrorRecoveryExecutor {
     message: string;
   } {
     const categorization = categorizeError(error);
-    const policy = this.strategies.get(categorization.category);
+    const policy = this.strategies.get(toRecoveryCategory(categorization.category));
 
     const shouldRetry = policy ? policy.getDelaySequence().length > 0 : false;
     const messages: Record<ErrorCategory, string> = {
@@ -138,9 +149,9 @@ export class ErrorRecoveryExecutor {
     };
 
     return {
-      category: categorization.category,
+      category: toRecoveryCategory(categorization.category),
       shouldRetry,
-      message: messages[categorization.category],
+      message: messages[toRecoveryCategory(categorization.category)],
     };
   }
 
