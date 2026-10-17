@@ -43,7 +43,7 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 | Permission mode "don't ask" blocks Bash | Blocked | Permission config (not changed by this session) |
 | Listener alert flood when idle | Partially addressed (`bb03819`) | Verification needed |
 | Missing context tracking | Not started (unverified) | — |
-| Stalled dashboard work | Stalled (unverified) | — |
+| Dashboard tile layout | Stalled | Locating dashboard code (localhost:4000). Flickering from polling; Y-axis height makes it hard to see all agents at once. Plan: switch to SSE or implement responsive CSS Grid layout. |
 
 ## 5. Known Blockers
 
@@ -56,8 +56,13 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 1. Verify `bb03819` stops the idle alert flood under a live run. Check logs for `[listener-running]` and idle alerts.
 2. Reproduce the Bash-under-"don't ask" blocker and confirm whether `107b52e` resolves it.
 3. Confirm status of Phases 2 and 3, then update section 2.
-4. Define scope for "stalled dashboard work."
-5. Scope context tracking as a new task.
+4. Locate and fix dashboard kanban tiles:
+   - Find dashboard code (runs on localhost:4000)
+   - Replace polling with SSE for real-time updates
+   - Implement CSS Grid auto-fit for responsive layout
+   - Fix flickering from constant re-renders
+5. Confirm scope of dashboard work (not verified in the repo).
+6. Scope context tracking as a new task.
 
 ## 7. Context for Next Session
 
