@@ -44,6 +44,7 @@ Design rules that come from that purpose:
 | `src/host.ts` | The persistent Claude process, event log, auto-compaction |
 | `src/insights.ts` | Status, cost, token and approval logic |
 | `src/autoplan.ts` | Detects plan steps and completions from agent output |
+| `src/capability-registry.ts` | Live agent capability registry behind the bridge's `/capability` and `requiresCapability` routing. Details in [docs/AGENT_CAPABILITY_DISCOVERY.md](docs/AGENT_CAPABILITY_DISCOVERY.md) |
 | `bin/orch-*` | The command-line tools the orchestrator (and you) use; `orch-overview` and `orch-cost` are good first commands |
 | `docs/MASTER_PROMPT.md` | **The orchestrator's system prompt** (source of truth), runtime context, and Windows port checklist |
 | `docs/ORCHESTRATOR_PROMPT.md` | **Complete interaction guidelines** for orchestrator behavior: multi-agent reporting, CLI protocol, communication style, status format, git governance, porting checklist |

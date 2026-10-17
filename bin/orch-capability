@@ -1,0 +1,66 @@
+#!/bin/bash
+# Announce this agent's capabilities to the HTTP task bridge (POST /capability).
+# Usage: orch-capability --name <name> [--bash] [--file-ops] [--lang ts,py] [--tool vitest,git] [--loop] [--interval 30]
+#
+# --loop re-announces every --interval seconds (default 30) so the agent stays fresh.
+# Run it in the background for the life of the session. An agent that stops refreshing goes stale after capabilityTTL (60s).
+# The token is read from $OPERATOR_STATE_DIR/bridge.token (default ~/.operator-state) and sent in a temp header file, never on the command line.
+
+BRIDGE="${ORCH_BRIDGE_URL:-http://127.0.0.1:5001}"
+STATE="${OPERATOR_STATE_DIR:-$HOME/.operator-state}"
+TOKEN_FILE="$STATE/bridge.token"
+
+NAME=""; BASH_OK=false; FILE_OK=false; LANGS=""; TOOLS=""; LOOP=false; INTERVAL=30
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name) NAME="${2:-}"; shift 2 ;;
+    --bash) BASH_OK=true; shift ;;
+    --file-ops) FILE_OK=true; shift ;;
+    --lang) LANGS="${2:-}"; shift 2 ;;
+    --tool) TOOLS="${2:-}"; shift 2 ;;
+    --loop) LOOP=true; shift ;;
+    --interval) INTERVAL="${2:-}"; shift 2 ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    *) echo "orch-capability: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$NAME" ]] || { echo "orch-capability: --name <name> is required" >&2; exit 2; }
+[[ "$NAME" =~ ^[a-zA-Z0-9_-]{1,64}$ ]] || { echo "orch-capability: name must be 1-64 letters, digits, _ or -" >&2; exit 2; }
+[[ "$INTERVAL" =~ ^[1-9][0-9]*$ ]] || { echo "orch-capability: --interval must be a positive integer" >&2; exit 2; }
+[[ -r "$TOKEN_FILE" ]] || { echo "orch-capability: no bridge token at $TOKEN_FILE (has the bridge started yet?)" >&2; exit 1; }
+
+HDR=$(mktemp) || exit 1
+trap 'rm -f "$HDR"' EXIT
+chmod 600 "$HDR"
+printf 'X-Orch-Token: %s\n' "$(tr -d '[:space:]' < "$TOKEN_FILE")" > "$HDR"
+
+# Comma-separated lists become JSON arrays; empty entries are dropped.
+LANG_JSON=$(printf '%s' "$LANGS" | jq -R 'split(",") | map(select(length > 0))')
+TOOL_JSON=$(printf '%s' "$TOOLS" | jq -R 'split(",") | map(select(length > 0))')
+BODY=$(jq -n --arg name "$NAME" --argjson bash "$BASH_OK" --argjson fileOps "$FILE_OK" \
+  --argjson languages "$LANG_JSON" --argjson tools "$TOOL_JSON" \
+  '{name: $name, bash: $bash, fileOps: $fileOps, languages: $languages, tools: $tools}')
+
+announce() {
+  local resp code json
+  resp=$(curl -sS -m 10 -X POST "$BRIDGE/capability" -H 'Content-Type: application/json' --header "@$HDR" -d "$BODY" -w '\n%{http_code}') || {
+    echo "orch-capability: bridge unreachable at $BRIDGE" >&2; return 1; }
+  code=$(tail -n1 <<<"$resp")
+  json=$(sed '$d' <<<"$resp")
+  if [[ "$code" =~ ^2 ]]; then
+    echo "announced $NAME: $json"
+  else
+    echo "orch-capability: bridge refused ($code): $json" >&2
+    return 1
+  fi
+}
+
+if [[ "$LOOP" == true ]]; then
+  while true; do
+    announce || echo "orch-capability: will retry in ${INTERVAL}s" >&2
+    sleep "$INTERVAL"
+  done
+else
+  announce
+fi

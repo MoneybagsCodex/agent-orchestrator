@@ -6,10 +6,13 @@
  * result reporting do not depend on the session's message channel.
  *
  * Endpoints:
- *   POST /task      {agent, task}                    orchestrator assigns work
+ *   POST /task      {agent, task, requiresCapability?} orchestrator assigns work; with
+ *                                                     requiresCapability and no agent, the least-loaded capable agent is picked
  *   GET  /task      ?agent=<id>                      agent claims its oldest pending task
  *   POST /result    {taskId, agent, status, summary} agent reports completion
  *   GET  /status    ?agent=<id> (optional)           counts and agent last-seen times
+ *   POST /capability {name, bash, fileOps, languages, tools}  agent announces what it can do (refresh every 30s)
+ *   GET  /capability                                 all registered agents with stale flags
  *
  * State is held in memory. It is lost when the process restarts.
  * Bound to 127.0.0.1 only.
@@ -22,6 +25,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import type { Server } from 'http';
+import { createCapabilityRegistry, loadAgentRegistryConfig, type AgentRegistryConfig, type CapabilityRegistry } from './capability-registry';
 
 export type TaskStatus = 'pending' | 'claimed' | 'done' | 'failed';
 
@@ -99,15 +103,21 @@ export interface Bridge {
   tasks: BridgeTask[];
   messages: BridgeMessage[];
   lastSeen: Map<string, string>;
+  registry: CapabilityRegistry;
   token: string;
   start(): Promise<Server>;
 }
 
-export function createBridge(config: HttpBridgeConfig = loadBridgeConfig(), onEvent?: (e: BridgeEvent) => void): Bridge {
+export function createBridge(
+  config: HttpBridgeConfig = loadBridgeConfig(),
+  onEvent?: (e: BridgeEvent) => void,
+  registryConfig: AgentRegistryConfig = loadAgentRegistryConfig(),
+): Bridge {
   const app = express();
   const tasks: BridgeTask[] = [];
   const messages: BridgeMessage[] = [];
   const lastSeen = new Map<string, string>();
+  const registry = createCapabilityRegistry(registryConfig);
   const token = loadOrCreateToken(config.tokenFile);
   const tokenBuf = Buffer.from(token);
 
@@ -140,22 +150,60 @@ export function createBridge(config: HttpBridgeConfig = loadBridgeConfig(), onEv
     }
   };
 
+  // Picks the capable agent with the fewest open (pending or claimed) tasks. Ties go to the first name alphabetically.
+  const leastLoaded = (candidates: { name: string }[]) => {
+    const open = (name: string) => tasks.filter((t) => t.agent === name && (t.status === 'pending' || t.status === 'claimed')).length;
+    return candidates.reduce((best, c) => (open(c.name) < open(best.name) ? c : best));
+  };
+
   app.post('/task', (req, res) => {
-    const { agent, task } = req.body ?? {};
-    if (!validAgent(agent)) return res.status(400).json({ error: 'agent must be 1-64 chars of letters, digits, _ or -' });
+    const { agent, task, requiresCapability } = req.body ?? {};
+    let target: string;
+
+    if (requiresCapability !== undefined) {
+      const norm = registry.normalize(requiresCapability);
+      if (!norm.ok) return res.status(400).json({ error: norm.error });
+      if (agent !== undefined && !validAgent(agent)) return res.status(400).json({ error: 'agent must be 1-64 chars of letters, digits, _ or -' });
+
+      if (agent !== undefined) {
+        if (!registry.satisfies(agent, requiresCapability)) {
+          return res.status(400).json({ error: `agent ${agent} is not registered, is stale, or lacks the required capability` });
+        }
+        target = agent;
+      } else {
+        const candidates = registry.getAgentsByCapability(requiresCapability);
+        if (candidates.length === 0) return res.status(400).json({ error: 'no agent has required capability' });
+        target = leastLoaded(candidates).name;
+      }
+    } else {
+      if (!validAgent(agent)) return res.status(400).json({ error: 'agent must be 1-64 chars of letters, digits, _ or -' });
+      target = agent;
+    }
+
     if (typeof task !== 'string' || task.trim() === '') return res.status(400).json({ error: 'task must be a non-empty string' });
     if (task.length > config.maxTaskChars) return res.status(413).json({ error: `task exceeds ${config.maxTaskChars} chars` });
 
     const created: BridgeTask = {
       id: randomUUID(),
-      agent,
+      agent: target,
       task,
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
     tasks.push(created);
     enforceCap();
-    res.status(201).json({ id: created.id, status: created.status });
+    res.status(201).json({ id: created.id, status: created.status, agent: created.agent });
+  });
+
+  app.post('/capability', (req, res) => {
+    const result = registry.register(req.body);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    touch(result.agent.name);
+    res.json({ ok: true, name: result.agent.name, expiresInMs: registry.ttl });
+  });
+
+  app.get('/capability', (_req, res) => {
+    res.json({ ttlMs: registry.ttl, agents: registry.getAllAgents() });
   });
 
   app.get('/task', (req, res) => {
@@ -229,6 +277,7 @@ export function createBridge(config: HttpBridgeConfig = loadBridgeConfig(), onEv
     tasks,
     messages,
     lastSeen,
+    registry,
     token,
     start: () =>
       new Promise<Server>((resolve, reject) => {
