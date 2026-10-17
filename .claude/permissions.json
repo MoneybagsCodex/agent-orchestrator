@@ -1,0 +1,16 @@
+{
+  "project": "agent-orchestrator",
+  "description": "Multi-agent orchestration system for Claude Code coordination",
+  "requiredPermissions": {
+    "bash": "required",
+    "fileEdit": "required",
+    "fileWrite": "required",
+    "crossSessionMessage": "required"
+  },
+  "reasoning": "Orchestration requires agents to edit code, run tests, commit changes, and coordinate via cross-session messages. Permission mode 'ask' is required so agents can receive work assignments and report completion without being blocked by permission mode mismatches.",
+  "recommended": {
+    "permissionMode": "ask",
+    "crossSessionHold": "release-on-approval"
+  },
+  "implementationNote": "This file documents permissions needed for reliable orchestration. As of 2026-10-17, Claude Code does not read this file automatically. Set Permission Mode to 'ask' in Claude Code settings manually when working on this project. Future enhancement: Claude Code may read this file at agent startup and apply the recommended permissions."
+}

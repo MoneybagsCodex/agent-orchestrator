@@ -204,6 +204,34 @@ Before marking a system "production-ready":
 - [ ] Windows/Mac compatibility tested (or documented as single-platform)
 - [ ] Configuration examples provided (orchestrator.config.json)
 
+## Project Permissions Configuration
+
+File: `.claude/permissions.json` (project root)
+
+Purpose: Document permission requirements for reliable multi-agent orchestration. If Claude Code later reads this file, it can apply the required permissions to agents launched in this project. It does not do so today.
+
+Schema:
+```json
+{
+  "project": "name",
+  "description": "human-readable description",
+  "requiredPermissions": {
+    "bash": "required|optional|forbidden",
+    "fileEdit": "required|optional|forbidden",
+    "fileWrite": "required|optional|forbidden",
+    "crossSessionMessage": "required|optional|forbidden"
+  },
+  "reasoning": "why these permissions are needed",
+  "recommended": {
+    "permissionMode": "ask|dont-ask|interactive",
+    "crossSessionHold": "release-on-approval|always-release|always-hold"
+  },
+  "implementationNote": "status and future enhancements"
+}
+```
+
+Current status: Orchestration requires bash, file operations, and cross-session messaging. Set Permission Mode to "Ask" manually when developing on this project.
+
 ## Related Files
 
 - `/CLAUDE.md` — This file (global operating guidelines)
