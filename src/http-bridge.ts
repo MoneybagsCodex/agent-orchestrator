@@ -46,7 +46,7 @@ export interface HttpBridgeConfig {
 const DEFAULTS: HttpBridgeConfig = {
   enabled: false,
   host: '127.0.0.1',
-  port: 5000,
+  port: 5001,
   maxTaskChars: 10000,
   maxTasks: 500,
 };

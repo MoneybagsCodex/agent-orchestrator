@@ -99,7 +99,7 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 **Solution:** HTTP-based parallel infrastructure for autonomous orchestrated workflows. Agents coordinate via REST API instead of cross-session messages, enabling reliable async task assignment and result reporting.
 
 **Architecture:**
-- Orchestrator runs lightweight HTTP server (localhost:5000, `src/http-bridge.ts`, config under `httpBridge` in `orchestrator.config.json`)
+- Orchestrator runs lightweight HTTP server (localhost:5001, `src/http-bridge.ts`, config under `httpBridge` in `orchestrator.config.json`)
 - Agents make HTTP requests instead of cross-session messages
 - REST API for task assignment and result reporting
 - State is in memory; lost on restart
