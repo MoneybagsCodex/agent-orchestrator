@@ -1,0 +1,54 @@
+#!/bin/bash
+# Send a reply to the master orchestrator through the HTTP task bridge.
+# Usage: orch-reply --agent <name> "<reply text>"
+#        orch-reply --agent <name> --task <task-id> --status done|failed "<summary>"
+#
+# <name> is your agent name: letters, digits, _ or -, up to 64 characters.
+# The bridge needs the shared secret in $OPERATOR_STATE_DIR/bridge.token (default ~/.operator-state).
+# The token is read from that file and sent in a temporary header file, never on the command line.
+
+BRIDGE="${ORCH_BRIDGE_URL:-http://127.0.0.1:5001}"
+STATE="${OPERATOR_STATE_DIR:-$HOME/.operator-state}"
+TOKEN_FILE="$STATE/bridge.token"
+
+AGENT=""; TASK=""; STATUS=""; TEXT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent) AGENT="${2:-}"; shift 2 ;;
+    --task) TASK="${2:-}"; shift 2 ;;
+    --status) STATUS="${2:-}"; shift 2 ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    *) TEXT="$1"; shift ;;
+  esac
+done
+
+[[ -n "$AGENT" ]] || { echo "orch-reply: --agent <name> is required" >&2; exit 2; }
+[[ "$AGENT" =~ ^[a-zA-Z0-9_-]{1,64}$ ]] || { echo "orch-reply: agent name must be 1-64 letters, digits, _ or -" >&2; exit 2; }
+[[ -n "$TEXT" ]] || { echo "orch-reply: reply text is required" >&2; exit 2; }
+[[ -r "$TOKEN_FILE" ]] || { echo "orch-reply: no bridge token at $TOKEN_FILE (has the bridge started yet?)" >&2; exit 1; }
+
+HDR=$(mktemp) || exit 1
+trap 'rm -f "$HDR"' EXIT
+chmod 600 "$HDR"
+printf 'X-Orch-Token: %s\n' "$(tr -d '[:space:]' < "$TOKEN_FILE")" > "$HDR"
+
+if [[ -n "$TASK" ]]; then
+  [[ "$STATUS" == "done" || "$STATUS" == "failed" ]] || { echo "orch-reply: --status must be done or failed" >&2; exit 2; }
+  BODY=$(jq -n --arg taskId "$TASK" --arg agent "$AGENT" --arg status "$STATUS" --arg summary "$TEXT" \
+    '{taskId: $taskId, agent: $agent, status: $status, summary: $summary}')
+  PATHNAME=/result
+else
+  BODY=$(jq -n --arg agent "$AGENT" --arg text "$TEXT" '{agent: $agent, text: $text}')
+  PATHNAME=/message
+fi
+
+RESP=$(curl -sS -m 10 -X POST "$BRIDGE$PATHNAME" -H 'Content-Type: application/json' --header "@$HDR" -d "$BODY" -w '\n%{http_code}') || {
+  echo "orch-reply: bridge unreachable at $BRIDGE" >&2; exit 1; }
+CODE=$(tail -n1 <<<"$RESP")
+JSON=$(sed '$d' <<<"$RESP")
+if [[ "$CODE" =~ ^2 ]]; then
+  echo "delivered to the bridge (${PATHNAME#/}): $JSON"
+else
+  echo "orch-reply: bridge refused ($CODE): $JSON" >&2
+  exit 1
+fi

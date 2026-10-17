@@ -100,11 +100,11 @@ Then report to the user: "Game agent just finished the tests. It said [verbatim 
    ```json
    {
      "to": "uds:/tmp/cc-socks/1234.sock",
-     "message": "What is the current state of the database after the migration? Reply with SendMessage to master-orchestrator."
+     "message": "What is the current state of the database after the migration? Reply by running: orch-reply --agent <your name> \"<reply>\""
    }
    ```
 
-3. **Wait for reply.** The agent will respond via SendMessage, which arrives in your conversation automatically, even minutes later.
+3. **Wait for reply.** The agent replies with orch-reply, which the server delivers to you as a [bridge-reply] turn, even minutes later.
 
 4. **Delivery is two-stage:**
    - `SendMessage result: accepted` — message reached the server

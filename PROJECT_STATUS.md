@@ -92,6 +92,8 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 
 **Not verified in this session:** Whether the other session has since released or denied the message, and whether any other session saw messages from this one.
 
+**Update (2026-10-17):** Agent replies now go through the task bridge instead of SendMessage. Agents run `orch-reply --agent <name> "<text>"`, which POSTs to `/message` on port 5001 with a shared token (`~/.operator-state/bridge.token`). The server hands each reply to the master as a `[bridge-reply]` turn. End-to-end test: a reply from `smoke-test` appeared in the master's transcript. SendMessage remains a fallback. Limit: agent names are self-declared, and the token only keeps out processes outside this machine's user.
+
 ## 9. SOLUTION: HTTP Sideband API for Orchestrator Communication
 
 **Problem:** Cross-session messaging is held by permission mode mismatches, blocking autonomous orchestration.

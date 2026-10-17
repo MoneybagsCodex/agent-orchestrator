@@ -97,7 +97,9 @@
     "port": 5001,
     "maxTaskChars": 10000,
     "maxTasks": 500,
-    "description": "Parallel HTTP bridge for task assignment and result reporting (src/http-bridge.ts). Localhost only. In-memory state. Not started by the server until wired in."
+    "maxReportChars": 4000,
+    "tokenFile": "~/.operator-state/bridge.token",
+    "description": "HTTP bridge for task assignment, result reporting and agent replies (src/http-bridge.ts). Localhost only, every request needs the token in tokenFile (created on first start). In-memory state. Agent replies are handed to the master orchestrator as turns."
   },
   "monitoring": {
     "blockersCheckIntervalMs": 5000,
