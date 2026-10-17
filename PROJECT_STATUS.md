@@ -1,0 +1,67 @@
+# PROJECT_STATUS
+
+Persistent context between sessions. Last updated: 2026-10-17.
+Sources: git log, `npm run typecheck` result, and docs in `docs/`. Items marked **(unverified)** come from the session brief and were not confirmed in the repo.
+
+## 1. System State
+
+- **Repo:** `agent-orchestrator` (`origin` → github.com/MoneybagsCodex/agent-orchestrator)
+- **Working tree:** clean at start of this session
+- **Typecheck:** `npm run typecheck` passes (exit 0)
+- **Latest commits:**
+  - `107b52e` Check the prompt's own command for bash auto-approval
+  - `e7a0b17` Fix typecheck errors and route categorized errors to retry strategies
+  - `bb03819` Fix: skip auto-approval alerts when no agents running
+- **Active agents:** (unverified) not checked in this session
+- **Recent issues:** (unverified) see Known Blockers
+
+## 2. Completed Phases
+
+Per the brief: **Phases 1, 4, 5, 6 complete.**
+
+Git history also contains commits for **Phase 2** (error categorization, `86bc48e`) and **Phase 3** (retry and backoff with circuit breaker, `b011d4d`). Phase 2 and 3 are not listed in the brief. Confirm their status before relying on this list.
+
+| Phase | Commit(s) | Doc |
+|---|---|---|
+| 1 Auto-Planning | `c0f7d64` | `docs/AUTO_PLANNING.md` |
+| 2 Error Categorization | `86bc48e` | `docs/ERROR_CATEGORIZATION_MATRIX.md` |
+| 3 Retry & Backoff | `b011d4d` | `docs/PHASE_3_RETRY_BACKOFF.md` |
+| 4 Recovery Actions | `480ed91` | `docs/PHASE_4_RECOVERY_ACTIONS.md` |
+| 5 Monitoring | `ba19eea` | `docs/PHASE_5_MONITORING.md`, `docs/PHASE_5_VALIDATION_REPORT.md` |
+| 6 Deployment / Integration | `71d0fbb`, `c2a7b48` | `docs/PHASE_6_DEPLOYMENT.md` |
+
+## 3. Current Goals
+
+1. **Permission system blocker:** agents on "don't ask" permission mode are blocked on Bash.
+2. **Listener alert fix:** listener floods alerts when idle. `bb03819` addresses part of this by skipping auto-approval alerts when no agents are running. Whether it fully resolves the flood is unverified.
+3. **Stalled dashboard work:** (unverified) scope not defined in the repo.
+
+## 4. Open Tasks
+
+| Task | Status | Blocked by |
+|---|---|---|
+| Permission mode "don't ask" blocks Bash | Blocked | Permission config (not changed by this session) |
+| Listener alert flood when idle | Partially addressed (`bb03819`) | Verification needed |
+| Missing context tracking | Not started (unverified) | — |
+| Stalled dashboard work | Stalled (unverified) | — |
+
+## 5. Known Blockers
+
+- **"Don't ask" permission mode blocks Bash.** Recent commit `107b52e` checks the prompt's own command for bash auto-approval. Effect on this blocker is unverified.
+- **Listener floods alerts when idle.** Docs describe a "Listener may be stuck" alert after 3+ minutes with no activity (`docs/AUTO_APPROVAL_SYSTEM.md`). This may be the source of the flood. Partial fix in `bb03819`.
+- **Missing context tracking.** No evidence in the repo of a context-tracking feature. (unverified)
+
+## 6. Next Steps
+
+1. Verify `bb03819` stops the idle alert flood under a live run. Check logs for `[listener-running]` and idle alerts.
+2. Reproduce the Bash-under-"don't ask" blocker and confirm whether `107b52e` resolves it.
+3. Confirm status of Phases 2 and 3, then update section 2.
+4. Define scope for "stalled dashboard work."
+5. Scope context tracking as a new task.
+
+## 7. Context for Next Session
+
+- This file was created at the request of the `master-orchestrator` session, for persistent context tracking.
+- Repo was clean and typecheck passed when this file was written.
+- Permission settings were not modified.
+- Start by reading this file, then `git log --oneline -15`, then `docs/AUTO_APPROVAL_SYSTEM.md` for the listener and blocker behavior.
