@@ -65,3 +65,24 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 - Repo was clean and typecheck passed when this file was written.
 - Permission settings were not modified.
 - Start by reading this file, then `git log --oneline -15`, then `docs/AUTO_APPROVAL_SYSTEM.md` for the listener and blocker behavior.
+
+## 8. Blocker: Cross-Session Messages Held by Permission Mode Mismatch
+
+**Priority:** High. Blocks reliable multi-session coordination.
+
+**What happened:**
+- A reply from this session to master-orchestrator (`uds:/tmp/cc-socks/40542.sock`, msg_id `b89844a8-3b1f-4435-aa06-830edd96106f`) was held by the recipient. Delivery notice: NOT delivered; its Claude has not seen it.
+- The held state did not expire or release during this session. Do not treat the message as delivered.
+
+**Likely cause (not confirmed):** Sessions run in different permission modes. A session in an interactive mode asks its user to approve; a non-interactive session cannot ask, so the hold expires unless the modes match. A session can also be set to hold all messages.
+
+**Impact:**
+- Orchestrator-to-agent work assignments and agent-to-orchestrator completion reports may not arrive.
+- Workaround in use: share results through git (committed files) instead of messages.
+
+**Options to resolve:**
+1. Project-level permission config that all sessions inherit. Verify the mechanism exists before relying on it.
+2. Orchestrator launches agents with matching permission modes.
+3. Cross-session messages bypass the mode check. This is a permission decision, so it needs the user's approval, not a workaround.
+
+**Not verified in this session:** Whether the other session has since released or denied the message, and whether any other session saw messages from this one.
