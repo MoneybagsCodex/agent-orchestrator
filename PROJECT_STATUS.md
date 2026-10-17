@@ -32,9 +32,10 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 
 ## 3. Current Goals
 
-1. **Permission system blocker:** agents on "don't ask" permission mode are blocked on Bash.
+1. **Permission system blocker: RESOLVED for agent replies** via the HTTP bridge (`506fe51`). Bash under "don't ask" mode is not covered by this and is still unverified (see section 4).
 2. **Listener alert fix:** listener floods alerts when idle. `bb03819` addresses part of this by skipping auto-approval alerts when no agents are running. Whether it fully resolves the flood is unverified.
-3. **Stalled dashboard work:** (unverified) scope not defined in the repo.
+3. **Dashboard tile layout: COMPLETE** (`aa57f58`, four-part rows, task-centric). **(unverified:** reported by master-orchestrator; commit not in this repo.)
+4. **Agent capability discovery: COMPLETE** (`b1c226b`, `e484d85`). `requiresCapability` routing via the bridge. 396 tests pass. Live check was against a temporary bridge.
 
 ## 4. Open Tasks
 
@@ -42,8 +43,6 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 |---|---|---|
 | Permission mode "don't ask" blocks Bash | Blocked | Permission config (not changed by this session) |
 | Listener alert flood when idle | Partially addressed (`bb03819`) | Verification needed |
-| Missing context tracking | Not started (unverified) | — |
-| Dashboard tile layout | Stalled | Locating dashboard code (localhost:4000). Flickering from polling; Y-axis height makes it hard to see all agents at once. Plan: switch to SSE or implement responsive CSS Grid layout. |
 
 ## 5. Known Blockers
 
@@ -122,3 +121,19 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 **Priority:** HIGH — Unblocks autonomous orchestration workflows
 
 **Status:** Bridge module implemented (`src/http-bridge.ts`), disabled by default and not yet started by the server. Wiring it into startup is pending.
+
+## 11. Session Summary (2026-10-17)
+
+**Delivered:**
+1. HTTP Sideband Bridge (506fe51) - agents reply via REST, no message holding
+2. Agent Capability Discovery (b1c226b, e484d85) - intelligent routing, 396 tests, live (smoke-tested against a temporary bridge)
+3. Dashboard Tiles (ff0cddb, ae545d3, bea8c9d, 2460531, aa57f58) - four-part rows, task-centric, compact **(unverified: these commits are not in this repo)**
+
+**Architecture improvements:**
+- Removed cross-session message dependency (now uses HTTP bridge)
+- Added capability registry for intelligent agent routing
+- Dashboard now scannable and task-focused
+
+**Pending:**
+- SSE state-stream endpoint (approved for future implementation)
+- Blocker tile real-world testing (needs a live blocked agent)
