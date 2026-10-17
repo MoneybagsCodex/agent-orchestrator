@@ -96,13 +96,13 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 
 **Problem:** Cross-session messaging is held by permission mode mismatches, blocking autonomous orchestration.
 
-**Solution:** Implement HTTP-based sideband communication layer that bypasses Claude Code's permission system entirely.
+**Solution:** HTTP-based parallel infrastructure for autonomous orchestrated workflows. Agents coordinate via REST API instead of cross-session messages, enabling reliable async task assignment and result reporting.
 
 **Architecture:**
-- Orchestrator runs lightweight HTTP server (localhost:5000)
+- Orchestrator runs lightweight HTTP server (localhost:5000, `src/http-bridge.ts`, config under `httpBridge` in `orchestrator.config.json`)
 - Agents make HTTP requests instead of cross-session messages
-- No holds, no permission delays, fully autonomous
 - REST API for task assignment and result reporting
+- State is in memory; lost on restart
 
 **Endpoints:**
 - `POST /task` — Assign work to agent (orchestrator → agent)
@@ -119,4 +119,4 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 
 **Priority:** HIGH — Unblocks autonomous orchestration workflows
 
-**Status:** Design ready, awaiting implementation
+**Status:** Bridge module implemented (`src/http-bridge.ts`), disabled by default and not yet started by the server. Wiring it into startup is pending.

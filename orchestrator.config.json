@@ -91,6 +91,14 @@
       }
     }
   },
+  "httpBridge": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 5000,
+    "maxTaskChars": 10000,
+    "maxTasks": 500,
+    "description": "Parallel HTTP bridge for task assignment and result reporting (src/http-bridge.ts). Localhost only. In-memory state. Not started by the server until wired in."
+  },
   "monitoring": {
     "blockersCheckIntervalMs": 5000,
     "messageTimeoutMs": 30000,
