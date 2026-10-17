@@ -24,6 +24,7 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { createBridge, loadBridgeConfig } from './http-bridge';
 
 const app = express();
 const PORT = parseInt(process.env.ORCH_PORT ?? '3003', 10);
@@ -801,3 +802,10 @@ app.listen(PORT, () => {
   console.log(`   Session ID: ${orchestratorSid}`);
   console.log(`   POST /chat {message, model} — stream response as SSE`);
 });
+
+const httpBridgeConfig = loadBridgeConfig();
+if (httpBridgeConfig.enabled) {
+  createBridge(httpBridgeConfig).start()
+    .then(() => console.log(`   HTTP bridge on http://${httpBridgeConfig.host}:${httpBridgeConfig.port}`))
+    .catch((err) => console.error(`[http-bridge] failed to start: ${err.message}`));
+}
