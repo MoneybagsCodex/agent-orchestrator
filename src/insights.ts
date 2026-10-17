@@ -1136,6 +1136,9 @@ export function checkAutoApprovalAlerts(): string[] {
  * );
  * // Returns: { isSafe: false }
  */
+// Compiled once per pattern; checkAutoApprovalEligibility runs on every blocker check.
+const patternRegexes = new Map<string, RegExp>();
+
 export function checkAutoApprovalEligibility(promptText: string, agentLastCommand?: string, processEnv?: NodeJS.ProcessEnv): { isSafe: boolean; operation?: string } {
   const config = loadAutoApprovalConfig();
   if (!config.enabled) return { isSafe: false };
@@ -1163,10 +1166,16 @@ export function checkAutoApprovalEligibility(promptText: string, agentLastComman
   // Split chained/substituted commands ("a && b", "a; b", "a | b", "$(b)", "`b`") into segments.
   // Every segment must independently be safe; any risky segment denies.
   const segments = cmd.split(/&&|\|\||[;&|\n`()]|\$\(/).map(s => s.trim()).filter(Boolean);
-  const matchesPattern = (text: string, patternLower: string): boolean =>
-    new RegExp(
-      `${/^\w/.test(patternLower) ? '(?<![\\w-])' : ''}${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${/\w$/.test(patternLower) ? '(?![\\w-])' : ''}`
-    ).test(text);
+  const matchesPattern = (text: string, patternLower: string): boolean => {
+    let re = patternRegexes.get(patternLower);
+    if (!re) {
+      re = new RegExp(
+        `${/^\w/.test(patternLower) ? '(?<![\\w-])' : ''}${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${/\w$/.test(patternLower) ? '(?![\\w-])' : ''}`
+      );
+      patternRegexes.set(patternLower, re);
+    }
+    return re.test(text);
+  };
 
   // A safe path only counts when the text is a bare path or starts with a known-safe command ("./evil.sh docs/a.md" is not safe).
   const fileTextOk = (t: string): boolean => {
