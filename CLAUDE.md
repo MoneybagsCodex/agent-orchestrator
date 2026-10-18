@@ -148,6 +148,18 @@ git push
 - Synchronous where possible (insights.ts runs periodically)
 - Error handling must be explicit
 
+### HTTP Bridge Task Assignment
+
+When assigning tasks via `POST /task` to the bridge:
+
+1. **Verify target agent exists** — Check `orch-status` or the agent registry (`GET /capability`) before assigning
+2. **If target doesn't exist:**
+   - Claim and complete the task yourself (simplest)
+   - Spawn a sub-agent to do the work
+   - Use agent capability discovery (`requiresCapability`) to find a qualified agent
+3. **Don't assign to non-existent agents** — Task will be claimed but stuck with no owner
+4. **Prefer self-claiming** — If you post a task, consider claiming it too (simpler than cross-agent handoff)
+
 ## Logging Standards
 
 ### Log Tags (console.log prefix format)
