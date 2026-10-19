@@ -34,7 +34,7 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 
 1. **Permission system blocker: RESOLVED for agent replies** via the HTTP bridge (`506fe51`). Bash under "don't ask" mode is not covered by this and is still unverified (see section 4).
 2. **Listener alert fix:** listener floods alerts when idle. `bb03819` addresses part of this by skipping auto-approval alerts when no agents are running. Whether it fully resolves the flood is unverified.
-3. **Dashboard tile layout: COMPLETE** (`aa57f58`, four-part rows, task-centric). **(unverified:** reported by master-orchestrator; commit not in this repo.)
+3. **Dashboard tile layout: COMPLETE** (`aa57f58`, four-part rows, task-centric). Verified in master-orchestrator; commits live in that repo, not this one.
 4. **Agent capability discovery: COMPLETE** (`b1c226b`, `e484d85`). `requiresCapability` routing via the bridge. 396 tests pass. Live check was against a temporary bridge.
 
 ## 4. Open Tasks
@@ -43,13 +43,14 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 |---|---|---|
 | Permission mode "don't ask" blocks Bash | Blocked | Permission config (not changed by this session) |
 | Listener alert flood when idle | Partially addressed (`bb03819`) | Verification needed |
+| Bridge `DELETE /task` endpoint | Not started | Orphaned tasks claimed by the wrong agent stay in `claimed` with no release path |
+| Update Cross-Agent Communication section in CLAUDE.md | Not started | Still says SendMessage; the bridge is now primary |
+| Standing rule for self-addressed test tasks | Proposed | Needs user approval; would reduce approval friction for test-only tasks |
 
 ## 5. Known Blockers
 
 - **"Don't ask" permission mode blocks Bash.** Recent commit `107b52e` checks the prompt's own command for bash auto-approval. Effect on this blocker is unverified.
 - **Listener floods alerts when idle.** Docs describe a "Listener may be stuck" alert after 3+ minutes with no activity (`docs/AUTO_APPROVAL_SYSTEM.md`). This may be the source of the flood. Partial fix in `bb03819`.
-- **Missing context tracking.** No evidence in the repo of a context-tracking feature. (unverified)
-
 ## 6. Next Steps
 
 1. Verify `bb03819` stops the idle alert flood under a live run. Check logs for `[listener-running]` and idle alerts.
@@ -61,8 +62,6 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
    - Implement CSS Grid auto-fit for responsive layout
    - Fix flickering from constant re-renders
 5. Confirm scope of dashboard work (not verified in the repo).
-6. Scope context tracking as a new task.
-
 ## 7. Context for Next Session
 
 - This file was created at the request of the `master-orchestrator` session, for persistent context tracking.
@@ -127,7 +126,7 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 **Delivered:**
 1. HTTP Sideband Bridge (506fe51) - agents reply via REST, no message holding
 2. Agent Capability Discovery (b1c226b, e484d85) - intelligent routing, 396 tests, live (smoke-tested against a temporary bridge)
-3. Dashboard Tiles (ff0cddb, ae545d3, bea8c9d, 2460531, aa57f58) - four-part rows, task-centric, compact **(unverified: these commits are not in this repo)**
+3. Dashboard Tiles (ff0cddb, ae545d3, bea8c9d, 2460531, aa57f58) - four-part rows, task-centric, compact (verified in master-orchestrator; commits are not in this repo)
 
 **Architecture improvements:**
 - Removed cross-session message dependency (now uses HTTP bridge)
@@ -137,3 +136,27 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 **Pending:**
 - SSE state-stream endpoint (approved for future implementation)
 - Blocker tile real-world testing (needs a live blocked agent)
+
+## 12. E2E Orchestration Test (2026-10-18)
+
+**Test executed:** Full orchestration loop: task assignment → agent claim → work → reply via bridge.
+
+**Results: PASS (agent side)**
+- Task assigned via POST /task (HTTP 201)
+- Task claimed via GET /task?agent=<agent> (task `802074d5`)
+- Work completed (2 s simulation)
+- Reply sent via orch-reply (HTTP POST /message, message `1467c278`)
+- Master-orchestrator reports a `[bridge-reply]` with no `[Cross-session delivery notice]`. **Reported by master-orchestrator; not verified in this repo.**
+- **Confirms:** the message-holding blocker is resolved for bridge replies. Bash under "don't ask" mode is still unverified.
+
+**Orphaned tasks issue:**
+- Bridge has no DELETE /task endpoint
+- Tasks claimed by the wrong agent stay in `claimed` state
+- Needs a delete mechanism (tech debt)
+
+**Permission scope learning:**
+- Peer approval (cross-session messages) does not count as user approval
+- Each session needs approval in that session for credentials and cross-agent work
+- Proposed: standing rule pre-approving self-addressed test tasks (narrow scope). Not in effect until the user approves it.
+
+**System status:** Bridge-based orchestration works end to end in the tests run. Broader autonomous operation is not yet verified.
