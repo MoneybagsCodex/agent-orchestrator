@@ -183,6 +183,29 @@ Claude Code evaluates tool permissions based on binary invocation, not stdin sou
 
 - Status: **IN DESIGN** (scoping Task A: CLI params, Task B: JSON schema, Task C: edge cases)
 
+### Session 2026-10-18: File-Driven Worker Design & Permission Strategy
+
+**Deliverables:**
+- File-driven transient worker design: **proposed**, not yet tested against a live worker
+- Task B JSON schema v1: **proposed** (sent to master-orchestrator; not yet accepted)
+- Task C risk assessment: **not done.** The safeguards and blockers listed below are open items, not a completed assessment.
+
+**Permission Decision: PROPOSED, needs the user's decision**
+- Start: fixed allowlist (bounded commands, pre-approved in CLAUDE.md)
+- Prove: run orchestration at scale with known-good commands
+- Graduate: expand to auto-approval once the system is proven
+- No permission settings or CLAUDE.md allowlist have been changed. Both need the user's approval.
+
+**Blockers (next session):**
+1. Add claim lease to bridge (fixes orphaned tasks)
+2. Define a safe allowlist (git, npm, basic shell). Requires the user's approval before it goes into CLAUDE.md
+3. Task A: CLI spec with allowlist permissions
+4. Build and test the file-driven worker
+
+**Alternative exploration:** Evaluate agentastic.dev as a comparison. Not started. Needs the user's go-ahead because it is an external service.
+
+**Status:** Design proposed, not yet built or tested. Next: the user decides on the permission strategy, then implementation.
+
 ### Layer 2: Task Cleanup (IMPORTANT)
 - Add DELETE /task/:id endpoint to http-bridge.ts
 - Add TTL expiry (5-min default) with cleanup loop
