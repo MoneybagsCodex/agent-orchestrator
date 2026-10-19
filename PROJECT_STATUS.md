@@ -164,12 +164,24 @@ Claude Code evaluates tool permissions based on binary invocation, not stdin sou
 
 **Solution: Three-Layer Fix (Sequential Implementation)**
 
-### Layer 1: Auto-Approval Flags (CRITICAL)
-- Launch workers with `claude --auto --allow-bash --allow-file-write`
-- Eliminates per-session approval prompts entirely
-- Master orchestrator spawns workers with these flags
-- Status: **PLANNED**
-- **Open:** these flags are not confirmed against the Claude Code CLI. This is a permission change and needs the user's decision before any implementation.
+### Layer 1: File-Driven Transient Workers (CRITICAL)
+**Pivot (from Gemini analysis):** Instead of persistent sessions with pre-approved flags, use ephemeral headless workers.
+
+**How it works:**
+1. Master writes task JSON to `~/.operator-state/tasks/pending_[agent_name].json`
+2. Spawn one-shot Claude Code instance with automation flags to read file, execute, reply, exit
+3. No persistent session = no approval harness = clean autonomous execution
+
+**Why this works (per Gemini analysis, not verified here):**
+- File I/O (system boundary) doesn't trigger permission evaluation
+- Ephemeral process has no lingering session state
+- One-shot execution avoids approval gate entirely
+
+**Open:**
+- Tool calls (Bash, Edit) inside the worker are still permission-gated. File I/O only moves the task, so the worker still needs an allow-list or permission mode. The exact flags must come from the CLI check (`--permission-mode`, `--allowedTools`), not from the old `--auto --allow-bash` names, which do not exist.
+- Changing worker permission modes is a user decision.
+
+- Status: **IN DESIGN** (scoping Task A: CLI params, Task B: JSON schema, Task C: edge cases)
 
 ### Layer 2: Task Cleanup (IMPORTANT)
 - Add DELETE /task/:id endpoint to http-bridge.ts
