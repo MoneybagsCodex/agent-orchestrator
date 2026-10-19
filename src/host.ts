@@ -12,6 +12,7 @@
  *  - keep a ledger of every message it sent to an agent and what happened to it
  */
 import { spawn, ChildProcess } from 'child_process';
+import { decideCompact } from './compact-policy';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -126,6 +127,7 @@ export class OrchestratorHost extends EventEmitter {
     const p = spawn('claude', args, { cwd: this.opts.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc = p;
     this.active = 0;
+    this.startCompactWatch();
     let buf = '';
     p.stdout!.on('data', (d) => {
       buf += d.toString('utf-8');
@@ -164,15 +166,46 @@ export class OrchestratorHost extends EventEmitter {
   }
 
   private autoTriggered = false;
+  private compactingSince = 0;          // ms; when the in-progress compact was sent, for the watchdog
+  private busySince = 0;                // ms; when the current busy stretch began (set by the compact timer)
+  private compactTimer: NodeJS.Timeout | null = null;
+
+  /** Runs every COMPACT_CHECK_MS, independent of turn ends: clears a stuck compact and compacts while busy past the defer limit. */
+  private startCompactWatch() {
+    if (this.compactTimer) return;
+    this.compactTimer = setInterval(() => this.compactTick(), 30_000);
+    this.compactTimer.unref();
+  }
+
+  private compactTick() {
+    const now = Date.now();
+    if (this.active > 0) this.busySince ||= now; else this.busySince = 0;
+    const action = decideCompact({
+      ctxTokens: this.ctxTokens, threshold: this.opts.compactAt?.() ?? 0, compacting: this.compacting, compactingSince: this.compactingSince,
+      hasProc: !!this.proc, busy: this.active > 0, busySince: this.busySince,
+      lastTry: this.lastCompactTry * 1000, now,
+    });
+    if (action === 'clear-stuck') {
+      console.log(`[host] compact sent ${Math.round((now - this.compactingSince) / 60000)} min ago never reported back: clearing`);
+      this.compacting = false; this.autoTriggered = false;
+      this.push({ kind: 'notify', level: 'warn', title: 'Compaction timed out', text: 'The compaction did not report back; it will be retried.' });
+    } else if (action === 'compact-idle') {
+      this.maybeCompact();
+    } else if (action === 'compact-deferred') {
+      console.log(`[host] context ${this.ctxTokens} over the line and busy for over 10 min: compacting mid-turn`);
+      this.maybeCompact(true);
+    }
+  }
+
   /** When idle and the context is past the threshold, ask the session to /compact itself. The summary replaces the old turns, so every later turn re-reads far less.
-   *  Guarded: never while a turn is running, never twice within 10 minutes (if the summary is still over the line, compacting again would loop), and a failed one is not retried at once. */
-  private maybeCompact() {
+   *  Guarded: never while a turn is running (unless forced after a long defer), never twice within 10 minutes (if the summary is still over the line, compacting again would loop), and a failed one is not retried at once. */
+  private maybeCompact(force = false) {
     const at = this.opts.compactAt?.() ?? 0;
-    if (!at || this.compacting || !this.proc || this.active > 0 || this.ctxTokens < at) return;
+    if (!at || this.compacting || !this.proc || (this.active > 0 && !force) || this.ctxTokens < at) return;
     const last = Math.max(this.lastCompactTry, this.compactions[this.compactions.length - 1]?.at ?? 0);
     if (Date.now() / 1000 - last < 600) return;
     this.lastCompactTry = Math.floor(Date.now() / 1000);
-    this.compacting = true; this.autoTriggered = true;
+    this.compacting = true; this.autoTriggered = true; this.compactingSince = Date.now();
     console.log(`[host] context ${this.ctxTokens} >= ${at}: compacting`);
     this.push({ kind: 'notify', level: 'info', title: 'Compacting orchestrator context', text: `Context reached ${Math.round(this.ctxTokens / 1000)}k tokens (limit ${Math.round(at / 1000)}k); summarizing the conversation.` });
     this.sendCompact();
