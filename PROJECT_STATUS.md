@@ -43,10 +43,6 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 |---|---|---|
 | Permission mode "don't ask" blocks Bash | Blocked | Permission config (not changed by this session) |
 | Listener alert flood when idle | Partially addressed (`bb03819`) | Verification needed |
-| Bridge `DELETE /task` endpoint | Not started | Orphaned tasks claimed by the wrong agent stay in `claimed` with no release path |
-| Update Cross-Agent Communication section in CLAUDE.md | Not started | Still says SendMessage; the bridge is now primary |
-| Standing rule for self-addressed test tasks | Proposed | Needs user approval; would reduce approval friction for test-only tasks |
-
 ## 5. Known Blockers
 
 - **"Don't ask" permission mode blocks Bash.** Recent commit `107b52e` checks the prompt's own command for bash auto-approval. Effect on this blocker is unverified.
@@ -160,3 +156,31 @@ Git history also contains commits for **Phase 2** (error categorization, `86bc48
 - Proposed: standing rule pre-approving self-addressed test tasks (narrow scope). Not in effect until the user approves it.
 
 **System status:** Bridge-based orchestration works end to end in the tests run. Broader autonomous operation is not yet verified.
+
+## 13. Orchestration Fixes (Gemini Analysis & Implementation)
+
+**Problem Analysis (from Gemini, relayed by master-orchestrator; not verified here):**
+Claude Code evaluates tool permissions based on binary invocation, not stdin source. HTTP bridge solved message holding, but per-session approvals remain because each worker needs explicit launch flags.
+
+**Solution: Three-Layer Fix (Sequential Implementation)**
+
+### Layer 1: Auto-Approval Flags (CRITICAL)
+- Launch workers with `claude --auto --allow-bash --allow-file-write`
+- Eliminates per-session approval prompts entirely
+- Master orchestrator spawns workers with these flags
+- Status: **PLANNED**
+- **Open:** these flags are not confirmed against the Claude Code CLI. This is a permission change and needs the user's decision before any implementation.
+
+### Layer 2: Task Cleanup (IMPORTANT)
+- Add DELETE /task/:id endpoint to http-bridge.ts
+- Add TTL expiry (5-min default) with cleanup loop
+- Prevents orphaned tasks from accumulating
+- Status: **PLANNED**
+
+### Layer 3: SSE Dashboard (NICE-TO-HAVE)
+- Replace polling with Server-Sent Events stream
+- Broadcast updates on POST /result and POST /capability
+- Reduces CPU overhead on master orchestrator
+- Status: **PLANNED**
+
+**Testing:** Each layer tested independently. Stop and report at each stage.
