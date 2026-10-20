@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Orchestrator Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0e27; color: #e0e0e0; padding: 20px; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    h1 { font-size: 24px; margin-bottom: 30px; color: #fff; }
+
+    .agents-grid { display: grid; gap: 12px; }
+    .agent-row {
+      display: grid;
+      grid-template-columns: 200px 1fr 150px 120px;
+      gap: 12px;
+      padding: 12px;
+      background: #1a1f3a;
+      border-radius: 8px;
+      border-left: 3px solid #4a5f8f;
+      align-items: center;
+      min-height: 56px;
+    }
+
+    .agent-name {
+      font-weight: 600;
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .agent-status {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #0a0e27;
+      width: fit-content;
+    }
+
+    .status-idle { color: #6ee7b7; background: rgba(110, 231, 183, 0.1); }
+    .status-working { color: #fbbf24; background: rgba(251, 191, 36, 0.1); }
+    .status-blocked { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+
+    .agent-task {
+      font-size: 13px;
+      color: #b0b0b0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .agent-tokens {
+      text-align: right;
+      font-size: 13px;
+      font-family: monospace;
+      padding: 0 12px;
+    }
+
+    .token-progress {
+      width: 100%;
+      height: 4px;
+      background: #0a0e27;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+
+    .token-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #6ee7b7, #fbbf24, #f87171);
+      transition: width 0.3s ease;
+    }
+
+    .agent-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+
+    .btn-compact {
+      background: #6366f1;
+      color: #fff;
+    }
+
+    .btn-compact:hover:not(:disabled) {
+      background: #4f46e5;
+    }
+
+    .btn-compact:disabled {
+      background: #4a5f8f;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .thinking {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #fbbf24;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #fbbf24;
+      border-radius: 50%;
+      border-top-color: transparent;
+      animation: spin 0.6s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .status-bar {
+      padding: 16px;
+      background: #1a1f3a;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      font-size: 13px;
+    }
+
+    .stat { }
+    .stat-label { color: #8b8b8b; font-size: 12px; margin-bottom: 4px; }
+    .stat-value { font-size: 18px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎯 Agent Orchestrator</h1>
+
+    <div class="status-bar" id="statusBar">
+      <div class="stat">
+        <div class="stat-label">Agents</div>
+        <div class="stat-value" id="agentCount">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Orchestrator Context</div>
+        <div class="stat-value" id="orchTokens">-</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Last Update</div>
+        <div class="stat-value" id="lastUpdate">-</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Status</div>
+        <div class="stat-value" id="orchestratorStatus">-</div>
+      </div>
+    </div>
+
+    <div class="agents-grid" id="agentsGrid"></div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://localhost:3003';
+    const POLL_INTERVAL = 2000; // 2 seconds
+    const TOKEN_THRESHOLD = 150000;
+
+    const compactState = new Map(); // Track compact requests: agentSid -> { requestId, startTime }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/status`);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        console.error('Status fetch failed:', e);
+        return null;
+      }
+    }
+
+    async function triggerCompact(agentSid, agentName) {
+      try {
+        const res = await fetch(`${API_BASE}/agent/${agentSid}/compact`, { method: 'POST' });
+        const data = await res.json();
+
+        if (data.ok) {
+          compactState.set(agentSid, {
+            requestId: data.requestId,
+            startTime: Date.now(),
+            agentName
+          });
+          console.log(`Compact started for ${agentName}`);
+        } else {
+          console.error(`Compact failed: ${data.message}`);
+        }
+      } catch (e) {
+        console.error('Compact request failed:', e);
+      }
+    }
+
+    function formatTokens(tokens) {
+      if (!tokens) return '-';
+      const percent = Math.round((tokens / TOKEN_THRESHOLD) * 100);
+      return `${tokens.toLocaleString()}/${TOKEN_THRESHOLD.toLocaleString()} (${percent}%)`;
+    }
+
+    function getStatusColor(state) {
+      if (state === 'IDLE') return 'status-idle';
+      if (state === 'WORKING') return 'status-working';
+      if (state === 'BLOCKED') return 'status-blocked';
+      return 'status-idle';
+    }
+
+    function renderAgent(agent) {
+      const isCompacting = compactState.has(agent.sid);
+      const compactInfo = compactState.get(agent.sid);
+      const compactTimeMs = compactInfo ? Date.now() - compactInfo.startTime : 0;
+      const isCompactTimeout = compactInfo && compactTimeMs > 60000;
+
+      // If compact timed out, remove it
+      if (isCompactTimeout) {
+        compactState.delete(agent.sid);
+      }
+
+      const tokenPercent = agent.contextTokens ? (agent.contextTokens / TOKEN_THRESHOLD) * 100 : 0;
+      const showCompactNeeded = agent.contextTokens >= TOKEN_THRESHOLD * 0.9; // Show at 90%+
+
+      const agentName = agent.topic || agent.label || agent.sid.slice(0, 8);
+
+      return `
+        <div class="agent-row">
+          <div>
+            <div class="agent-name">${agentName}</div>
+            <div class="agent-status ${getStatusColor(agent.state)}">${agent.state || 'UNKNOWN'}</div>
+          </div>
+          <div class="agent-task">${agent.lastSummary || '-'}</div>
+          <div class="agent-tokens">
+            <div>${formatTokens(agent.contextTokens)}</div>
+            <div class="token-progress">
+              <div class="token-bar" style="width: ${Math.min(tokenPercent, 100)}%"></div>
+            </div>
+          </div>
+          <div class="agent-actions">
+            ${isCompacting ? `
+              <div class="thinking">
+                <div class="spinner"></div>
+                Compacting
+              </div>
+            ` : showCompactNeeded ? `
+              <button class="btn btn-compact" onclick="window.compactAgent('${agent.sid}', '${agentName}')">
+                Compact
+              </button>
+            ` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function render(status) {
+      if (!status) {
+        document.getElementById('agentsGrid').innerHTML = '<p style="padding: 20px; color: #888;">Connecting to orchestrator...</p>';
+        return;
+      }
+
+      const agents = status.agents || [];
+      document.getElementById('agentCount').textContent = agents.length;
+      document.getElementById('orchTokens').textContent = formatTokens(status.contextTokens);
+      document.getElementById('orchestratorStatus').textContent = status.state || '-';
+      document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+      const html = agents.map(renderAgent).join('');
+      document.getElementById('agentsGrid').innerHTML = html;
+    }
+
+    window.compactAgent = function(agentSid, agentName) {
+      triggerCompact(agentSid, agentName);
+    };
+
+    async function poll() {
+      const status = await fetchStatus();
+      render(status);
+    }
+
+    // Initial render and set up polling
+    poll();
+    setInterval(poll, POLL_INTERVAL);
+
+    // Keep page visible and polling even if hidden
+    document.addEventListener('visibilitychange', () => {
+      console.log('Page visibility changed:', document.hidden ? 'hidden' : 'visible');
+    });
+  </script>
+</body>
+</html>
