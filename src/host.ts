@@ -66,7 +66,11 @@ const BASH_ALLOWED = [
   'Bash(sleep:*)', 'Bash(date:*)',
 ];
 // Refused even if a later rule would allow them.
-const BASH_DENIED = ['Bash(rm:*)', 'Bash(sudo:*)', 'Bash(ssh:*)'];
+// Force pushes are denied in both flag orders, since "git:*" would otherwise allow them.
+const BASH_DENIED = [
+  'Bash(rm:*)', 'Bash(sudo:*)', 'Bash(ssh:*)',
+  'Bash(git push --force*)', 'Bash(git push -f*)', 'Bash(git push * --force*)', 'Bash(git push * -f*)',
+];
 
 export class OrchestratorHost extends EventEmitter {
   private proc: ChildProcess | null = null;
