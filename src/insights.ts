@@ -1062,6 +1062,11 @@ export function getMetricsSummary(): string {
  *   // Send to orchestrator via system message
  * }
  */
+/** An agent is running when it is working or waiting on a prompt. Idle sessions still count as agents, so `length > 0` is not the test. */
+export function hasRunningAgents(agents: Array<{ state?: string }>): boolean {
+  return agents.some((a) => a.state === 'WORKING' || a.state === 'BLOCKED');
+}
+
 export function checkAutoApprovalAlerts(): string[] {
   const alerts: string[] = [];
 
@@ -1602,9 +1607,9 @@ export function startInsights(d: Deps) {
       const now = Date.now();
       if (now - lastAlertSent > ALERT_INTERVAL_MS) {
         lastAlertSent = now;
-        // Zero activity with no agents is expected, not a listener failure
+        // Zero activity with no working agent is expected: idle sessions never raise a prompt to approve
         const agents = await getAgents();
-        if (agents.length > 0) {
+        if (hasRunningAgents(agents)) {
           const alerts = checkAutoApprovalAlerts();
           if (alerts.length > 0) {
             const msg = `[auto-approval-status] ${alerts.join('\n')}`;
