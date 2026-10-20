@@ -57,6 +57,17 @@ interface HostOptions {
 
 export interface Compaction { at: number; pre: number; post: number; trigger: string; ms: number }
 
+// Bash the orchestrator may run without asking. Prefix patterns, so "git:*" also covers git push.
+const BASH_ALLOWED = [
+  'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-plan:*)', 'Bash(orch-overview:*)', 'Bash(orch-list:*)',
+  'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)', 'Bash(orch-restart:*)',
+  'Bash(git:*)', 'Bash(npm run:*)', 'Bash(npm test:*)',
+  'Bash(grep:*)', 'Bash(cat:*)', 'Bash(ls:*)', 'Bash(head:*)', 'Bash(tail:*)', 'Bash(cut:*)', 'Bash(wc:*)',
+  'Bash(sleep:*)', 'Bash(date:*)',
+];
+// Refused even if a later rule would allow them.
+const BASH_DENIED = ['Bash(rm:*)', 'Bash(sudo:*)', 'Bash(ssh:*)'];
+
 export class OrchestratorHost extends EventEmitter {
   private proc: ChildProcess | null = null;
   private opts: HostOptions;
@@ -105,9 +116,11 @@ export class OrchestratorHost extends EventEmitter {
       // A stable name: agents reply to a NAME, and the auto-generated one changes every restart, which sends their replies nowhere.
       '--name', 'master-orchestrator',
       ...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
-      // Same footing as the auto-mode agents: every tool, user settings and MCP servers. Auto mode's classifier checks each action.
-      // acceptEdits: file writes go through without asking only inside the working directory (this repo). Bash still goes through auto mode.
+      // acceptEdits: file writes go through without asking only inside the working directory (this repo).
+      // Bash runs only if it matches BASH_ALLOWED; anything else is refused, and BASH_DENIED is an explicit backstop.
       '--permission-mode', 'acceptEdits',
+      '--allowedTools', ...BASH_ALLOWED,
+      '--disallowedTools', ...BASH_DENIED,
       '--append-system-prompt', this.opts.role,
     ];
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${this.opts.binDir}:${process.env.PATH}`, BRIDGE_URL: this.opts.bridgeUrl };
