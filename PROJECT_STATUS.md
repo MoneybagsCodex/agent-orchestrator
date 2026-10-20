@@ -219,3 +219,54 @@ Claude Code evaluates tool permissions based on binary invocation, not stdin sou
 - Status: **PLANNED**
 
 **Testing:** Each layer tested independently. Stop and report at each stage.
+
+## 14. Compact Protocol for Agent Context Compression (2026-10-19)
+
+**Goal:** Enable dashboard compact button to trigger `/compact` command on remote agents, with visual feedback.
+
+**Problem:**
+- Dashboard at localhost:4000 has compact button per agent tile
+- Button currently does nothing (cannot trigger `/compact` slash command remotely)
+- Need protocol to: send compact request → agent executes → reports result → dashboard updates
+
+**Solution: Compact Request Protocol**
+
+### Architecture
+1. **Orchestrator endpoint:** `POST /agent/:agentId/compact`
+   - Receives compact request from dashboard
+   - Sends SendMessage to agent: `"COMPACT_REQUEST"`
+   - Waits for agent response (via message subscription or timeout)
+   - Returns `{status: "completed", tokensBefore: N, tokensAfter: M}`
+
+2. **Agent behavior (CLAUDE.md guideline):**
+   - When message contains `"COMPACT_REQUEST"`
+   - Auto-execute `/compact` command
+   - Reply via `orch-reply --agent <name> "COMPACT_DONE: <tokens>"`
+
+3. **Dashboard UI:**
+   - Compact button sends POST to `/agent/:id/compact`
+   - Shows THINKING spinner while waiting (5s timeout)
+   - Updates token count tile when response arrives
+   - Shows success/error message
+
+4. **orch-reply enhancement (bin/orch-reply):**
+   - Add flag for structured responses: `--compact-result <tokens>`
+   - Bridge captures and forwards to orchestrator
+
+### Implementation Steps
+- [ ] Add endpoint: `src/server.ts` `POST /agent/:agentId/compact`
+- [ ] Add bridge handler: `src/http-bridge.ts` capture compact responses
+- [ ] Update orch-reply: `bin/orch-reply --compact-result` flag
+- [ ] Update CLAUDE.md: agents watch for `COMPACT_REQUEST` and auto-execute `/compact`
+- [ ] Dashboard button: `public/index.html` + polling logic for result
+- [ ] Integration test: end-to-end compact request + response
+
+**Status:** **DESIGN READY, IMPLEMENTATION IN PROGRESS** (2026-10-19 18:18)
+
+**Testing plan:**
+1. Send compact request to a live agent
+2. Verify agent receives `COMPACT_REQUEST` message
+3. Verify agent runs `/compact` automatically
+4. Verify orchestrator receives result via bridge
+5. Verify dashboard updates with new token count
+
