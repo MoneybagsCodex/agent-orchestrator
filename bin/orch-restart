@@ -1,7 +1,7 @@
 #!/bin/bash
 # Restart the agent-orchestrator server on port 3003. Usage: orch-restart
 # Refuses to kill anything on the port that is not agent-orchestrator's own server.
-# The restart runs in a detached session, so it still completes if the caller is the process being restarted.
+# The restart runs in a detached background shell, so it still completes if the caller is the process being restarted.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=3003
@@ -16,7 +16,7 @@ if [ -n "$pid" ]; then
   esac
 fi
 
-nohup setsid bash -c "
+nohup bash -c "
   [ -n '$pid' ] && kill $pid 2>/dev/null
   for i in \$(seq 1 20); do lsof -nP -iTCP:$PORT -sTCP:LISTEN -t >/dev/null 2>&1 || break; sleep 0.5; done
   cd '$ROOT' && exec npm run server
