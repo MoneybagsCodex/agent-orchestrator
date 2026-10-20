@@ -57,13 +57,6 @@ interface HostOptions {
 
 export interface Compaction { at: number; pre: number; post: number; trigger: string; ms: number }
 
-const ALLOWED = [
-  'ListAgents', 'SendMessage', 'ToolSearch',
-  'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-plan:*)', 'Bash(orch-overview:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
-  'Bash(orch-restart:*)',
-  'Bash(sleep:*)', 'Bash(cut:*)', 'Bash(tail:*)', 'Bash(head:*)', 'Bash(grep:*)',
-];
-
 export class OrchestratorHost extends EventEmitter {
   private proc: ChildProcess | null = null;
   private opts: HostOptions;
@@ -112,13 +105,8 @@ export class OrchestratorHost extends EventEmitter {
       // A stable name: agents reply to a NAME, and the auto-generated one changes every restart, which sends their replies nowhere.
       '--name', 'master-orchestrator',
       ...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
-      // Locked down: only these tools, anything else is denied outright; user-level settings (with their
-      // broad allow rules) are ignored; no MCP servers; no Skill tool. (Slash commands stay enabled: the host sends /compact to itself.)
-      '--tools', 'Bash,ListAgents,SendMessage,ToolSearch',
-      '--permission-mode', 'dontAsk',
-      '--setting-sources', 'project',
-      '--strict-mcp-config',
-      '--allowedTools', ...ALLOWED,
+      // Same footing as the auto-mode agents: every tool, user settings and MCP servers. Auto mode's classifier checks each action.
+      '--permission-mode', 'auto',
       '--append-system-prompt', this.opts.role,
     ];
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${this.opts.binDir}:${process.env.PATH}`, BRIDGE_URL: this.opts.bridgeUrl };
