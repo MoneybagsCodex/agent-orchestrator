@@ -60,6 +60,7 @@ export interface Compaction { at: number; pre: number; post: number; trigger: st
 const ALLOWED = [
   'ListAgents', 'SendMessage', 'ToolSearch',
   'Bash(orch-status:*)', 'Bash(orch-usage:*)', 'Bash(orch-plan:*)', 'Bash(orch-overview:*)', 'Bash(orch-list:*)', 'Bash(orch-send:*)', 'Bash(orch-read:*)', 'Bash(orch-wait:*)',
+  'Bash(orch-restart:*)',
   'Bash(sleep:*)', 'Bash(cut:*)', 'Bash(tail:*)', 'Bash(head:*)', 'Bash(grep:*)',
 ];
 

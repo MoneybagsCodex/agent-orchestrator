@@ -1,0 +1,25 @@
+#!/bin/bash
+# Restart the agent-orchestrator server on port 3003. Usage: orch-restart
+# Refuses to kill anything on the port that is not agent-orchestrator's own server.
+# The restart runs in a detached session, so it still completes if the caller is the process being restarted.
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PORT=3003
+LOG="$ROOT/orchestrator.log"
+
+pid=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null | head -1)
+if [ -n "$pid" ]; then
+  cmd=$(ps -o command= -p "$pid")
+  case "$cmd" in
+    *agent-orchestrator*) ;;
+    *) echo "refusing: port $PORT is held by an unexpected process: $cmd" >&2; exit 1 ;;
+  esac
+fi
+
+nohup setsid bash -c "
+  [ -n '$pid' ] && kill $pid 2>/dev/null
+  for i in \$(seq 1 20); do lsof -nP -iTCP:$PORT -sTCP:LISTEN -t >/dev/null 2>&1 || break; sleep 0.5; done
+  cd '$ROOT' && exec npm run server
+" > "$LOG" 2>&1 < /dev/null &
+
+echo "restart queued: stopping pid ${pid:-none}, new server logs to $LOG"
