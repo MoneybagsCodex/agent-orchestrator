@@ -107,6 +107,8 @@ export class OrchestratorHost extends EventEmitter {
       ...(started ? ['--resume', this.opts.sid] : ['--session-id', this.opts.sid]),
       // Same footing as the auto-mode agents: every tool, user settings and MCP servers. Auto mode's classifier checks each action.
       '--permission-mode', 'auto',
+      // Writes are pre-approved only inside this repo. Bash redirects are not covered and still ask.
+      '--allowedTools', `Write(${this.opts.cwd}/**)`, `Edit(${this.opts.cwd}/**)`,
       '--append-system-prompt', this.opts.role,
     ];
     const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${this.opts.binDir}:${process.env.PATH}`, BRIDGE_URL: this.opts.bridgeUrl };
