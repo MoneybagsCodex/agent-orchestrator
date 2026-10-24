@@ -70,6 +70,18 @@ function getOrchestratorSid(): string {
 const orchestratorSid = getOrchestratorSid();
 const BIN_DIR = path.resolve(import.meta.dirname, '../bin');
 
+// Serve public dashboard
+app.use(express.static(path.join(path.dirname(BIN_DIR), 'public')));
+
+// Compact protocol: track requests for dashboard polling
+const compactRequests = new Map<string, { agentSid: string; startTime: number }>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, req] of compactRequests) {
+    if (now - req.startTime > 60000) compactRequests.delete(id);
+  }
+}, 30000);
+
 // The system prompt for the orchestrator agent
 const ORCHESTRATOR_ROLE = `FIRST RULE, above everything else: if the user's message mentions usage, limits, quota, credits, cost, spend, budget or tokens, your FIRST and ONLY action is to run orch-usage and report exactly what it prints. The "tokens left" number that appears in your own system messages describes your private working budget, NOT the user's account; quoting it is a wrong answer, so never mention it. If orch-usage cannot tell something, say it cannot.
 
@@ -222,6 +234,22 @@ app.post('/action', async (req, res) => {
   if (!sid || !['compact', 'stop', 'retest'].includes(action ?? '')) return res.status(400).json({ ok: false, message: 'sid and a valid action are required' });
   statusCache = null;
   res.json(await quickAction(sid, action!).catch((e) => ({ ok: false, message: String(e.message ?? e) })));
+});
+
+/** POST /agent/:agentId/compact — Trigger compact via dashboard, return requestId for polling */
+app.post('/agent/:agentId/compact', async (req, res) => {
+  const agents = await getAgents();
+  const agent = agents.find((a: any) => a.sid === req.params.agentId || a.sid.startsWith(req.params.agentId));
+  if (!agent) return res.status(404).json({ ok: false, message: 'Agent not found' });
+  const requestId = randomUUID();
+  compactRequests.set(requestId, { agentSid: agent.sid, startTime: Date.now() });
+  quickAction(agent.sid, 'compact').catch(() => {});
+  res.json({ ok: true, requestId, agentName: agent.topic || agent.label });
+});
+
+/** GET /agent/:agentId/compact/:requestId — Check if compact is still pending */
+app.get('/agent/:agentId/compact/:requestId', (req, res) => {
+  res.json(compactRequests.has(req.params.requestId) ? { ok: true, status: 'pending' } : { ok: false, message: 'Request expired' });
 });
 
 /** Standing instructions the orchestrator keeps applying. */
