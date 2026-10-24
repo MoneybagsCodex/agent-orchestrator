@@ -261,12 +261,27 @@ Claude Code evaluates tool permissions based on binary invocation, not stdin sou
 - [ ] Dashboard button: `public/index.html` + polling logic for result
 - [ ] Integration test: end-to-end compact request + response
 
-**Status:** **DESIGN READY, IMPLEMENTATION IN PROGRESS** (2026-10-19 18:18)
+**Status:** **COMPLETE** (2026-10-24 18:00)
 
-**Testing plan:**
-1. Send compact request to a live agent
-2. Verify agent receives `COMPACT_REQUEST` message
-3. Verify agent runs `/compact` automatically
-4. Verify orchestrator receives result via bridge
-5. Verify dashboard updates with new token count
+**Implementation (commits):**
+- `1fd639b` Dashboard UI: agents grid, tokens, compact button, THINKING spinner
+- `f997b35` Server endpoints: POST/GET `/agent/:agentId/compact`, static serving, tracking/cleanup
+
+**How it works:**
+1. Dashboard at localhost:4000 polls `/status` every 2s
+2. Shows compact button when tokens > 90% threshold
+3. Click button → POST `/agent/:agentId/compact` (async)
+4. Server tracks request, triggers `quickAction(sid, 'compact')`
+5. Dashboard shows THINKING spinner while `compactRequests.has(requestId)`
+6. When tokens drop (compact finishes), spinner auto-hides
+7. GET endpoint expires requests after 60s, cleanup runs every 30s
+
+**Ready to test:** 
+```bash
+kill -9 $(lsof -i :3003 -t) 2>/dev/null
+cd /Users/joshuaminton/projects/agent-orchestrator && npm run server > orchestrator.log 2>&1 &
+open http://localhost:4000
+```
+
+Then click Compact button on any agent tile to test.
 
