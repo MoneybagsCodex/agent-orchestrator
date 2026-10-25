@@ -34,6 +34,33 @@ The system has been thoroughly tested and developed through a comprehensive five
 - Agents reply via SendMessage back to this agent or orchestrator
 - Wait for agent completion notifications before reporting results
 
+### Checking Agent Work Status
+
+**Quick status check:**
+```bash
+orch-status
+```
+Shows: agent name, state (IDLE/WORKING/BLOCKED), last activity time, token usage
+
+**Detailed recent work (last 3 messages):**
+```bash
+orch-read <agent-id-or-name> 3
+```
+
+**Format for reporting:**
+```
+| Agent | State | Last Task | Status |
+|-------|-------|-----------|--------|
+| OE/job dashboard | WORKING | OE checklist updates | 2m ago |
+| agent-capability-discovery | IDLE | Orchestrator testing | 51m ago |
+| fix-dashboard-tile-flicker | IDLE | Cockpit upgrade | idle |
+```
+
+**When to check:**
+- Before assigning new work (verify capacity)
+- Investigating blockers (what was the agent doing?)
+- Status updates to user (what's progressing?)
+
 ## Git Workflow (MANDATORY)
 
 **Auto-commit and auto-push EVERY change:**
