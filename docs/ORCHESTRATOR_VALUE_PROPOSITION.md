@@ -153,9 +153,192 @@ System:
 - Research automation (parallel experiments)
 - Content generation at scale (autonomous publishing pipeline)
 
+## Head-to-Head: Semi-Autonomous vs. Headless
+
+### Semi-Autonomous (Human-in-the-Loop)
+
+**Architecture:**
+- Humans set goals, assign tasks explicitly
+- Agents execute autonomously
+- Dashboard for observation + manual override
+- Escalations: blockers go back to human
+
+**Workflow example:**
+```
+Human: "Refactor auth module"
+↓
+System breaks down: schema → API → tests → docs
+↓
+Human assigns to agents (Agent-API, Agent-Tests, etc.)
+↓
+Agents execute in parallel
+↓
+Agent-API blocks: "need schema decision"
+↓
+Human sees blocker, makes decision
+↓
+Agents continue
+```
+
+**Pros:**
+- ✅ Predictable (you control what happens)
+- ✅ Safe (humans make high-stakes calls)
+- ✅ Easy to debug (clear cause → effect)
+- ✅ Good oversight (see every decision)
+- ✅ Can context-switch (pause/resume work)
+
+**Cons:**
+- ❌ Requires constant attention (not autonomous)
+- ❌ Human becomes bottleneck on decisions
+- ❌ Doesn't scale (10x tasks = 10x human time)
+- ❌ Can't work nights/weekends
+- ❌ Decision latency (human response time)
+
+**Cost/effort:**
+- Engineering: High (build task assignment UI, blocking)
+- Operations: High (someone monitors/decides constantly)
+- Total human time: 30-50% of agents' working time
+
+**Best for:**
+- Supervised work (research, experimentation)
+- High-risk domains (compliance, legal reviews)
+- Complex decisions (strategy, architecture)
+- Team coordination (multiple stakeholders)
+
+---
+
+### Fully Headless (Autonomous)
+
+**Architecture:**
+- System generates goals from high-level objectives
+- System decomposes into multi-step plans
+- System routes to agents with matching capabilities
+- Only escalates decisions humans actually need to make
+- Continuous operation (24/7)
+
+**Workflow example:**
+```
+Human: "Reduce p95 latency by 20%"
+↓
+System analyzes metrics, identifies bottlenecks
+↓
+System plans: profile → identify hot spot → optimize
+↓
+System assigns to Agent-Perf
+↓
+Agent-Perf self-organizes work, reports progress
+↓
+Agent-Perf hits: "Should we add caching layer?"
+↓
+System escalates: "Decision needed: cache strategy"
+↓
+Human approves caching approach
+↓
+Agent-Perf implements autonomously
+↓
+System validates improvement vs. goal
+```
+
+**Pros:**
+- ✅ 24/7 autonomous operation (no human needed constantly)
+- ✅ Scales horizontally (100 tasks = same human effort)
+- ✅ Fast decision loop (minutes, not hours)
+- ✅ Can work nights/weekends
+- ✅ Continuous improvement (learn from outcomes)
+- ✅ No human bottleneck on routine decisions
+
+**Cons:**
+- ❌ Hard to build (complex goal engine + planning)
+- ❌ Requires clear success metrics
+- ❌ Less oversight (harder to predict what it'll do)
+- ❌ Needs robust escalation policy (when to ask human?)
+- ❌ Harder to debug (emergent behavior)
+
+**Cost/effort:**
+- Engineering: Very high (goal engine, planning, learning)
+- Operations: Low (monitor outcomes, not decisions)
+- Total human time: 5-10% of agents' working time
+
+**Best for:**
+- Routine work (feature dev, refactoring, testing)
+- Clear success metrics (latency, test coverage, etc.)
+- Large-scale operations (100+ concurrent agents)
+- Long-running projects (continuous improvement)
+
+---
+
+## Direct Comparison Table
+
+| Dimension | Semi-Autonomous | Headless |
+|-----------|-----------------|----------|
+| **Human oversight** | High | Low |
+| **Speed** | Slow (human decisions are bottleneck) | Fast (agents self-decide) |
+| **Scale** | Linear (more agents = more human work) | Sublinear (system scales autonomously) |
+| **Safety** | High (humans control everything) | Medium (escalation policy matters) |
+| **Uptime** | Business hours | 24/7 |
+| **Complexity** | Low (straightforward) | High (goal engine + planning) |
+| **Build effort** | 2-4 weeks | 3-6 months |
+| **Typical latency** | Hours (wait for human) | Minutes |
+| **Failure mode** | Blocked on human decision | Wrong decision made autonomously |
+| **Cost at 10 agents** | $6-10k/month | $5-9k/month |
+| **Cost at 100 agents** | $15-25k/month | $5-9k/month (scales much better) |
+| **Cost at 1000 agents** | $50-100k/month | $8-15k/month (clear winner) |
+
+---
+
+## When to Use Each
+
+### Use Semi-Autonomous When:
+
+1. **Work is exploratory** — don't know success criteria yet
+2. **High stakes** — legal, compliance, financial decisions
+3. **Need oversight** — audit trail, human judgment required
+4. **Decision frequency** — few big decisions, many small executables
+5. **Team size** — small team, can handle monitoring burden
+6. **Timeline** — work fits in business hours
+
+**Example:** Migrating legacy system, regulatory compliance work, architectural decisions
+
+### Use Headless When:
+
+1. **Work is repeatable** — clear patterns, predictable outcomes
+2. **Success is measurable** — metrics-driven (tests pass, perf improves)
+3. **Scale matters** — 100+ concurrent tasks
+4. **Time matters** — need 24/7 operation
+5. **Cost matters** — at scale, human overhead kills economics
+6. **Few decisions** — most work is execution, few choices needed
+
+**Example:** Continuous testing pipeline, automated refactoring, performance tuning, feature development with clear specs
+
+---
+
+## The Hybrid Approach
+
+**Best practice:** Start semi-autonomous, graduate to headless
+
+1. **Phase 1 (Semi-autonomous):** Humans assign tasks, validate approach
+2. **Phase 2 (Hybrid):** System generates task ideas, human approves
+3. **Phase 3 (Headless):** System generates + executes, human only on escalations
+4. **Phase 4 (Autonomous):** System learns from outcomes, improves autonomously
+
+**Timeline:** 6-12 months to mature headless system
+
+**Why this works:**
+- Phases 1-2: Build confidence in agent reliability
+- Phase 2: Learn what escalations matter
+- Phase 3: Observe 24/7 operation, refine policy
+- Phase 4: Compound improvements over time
+
 ## Decision Framework
 
-**Choose Local Orchestrator if:**
+**Choose Semi-Autonomous if:**
+- Privacy matters (sensitive data)
+- Control matters (need to override)
+- Safety critical (aerospace, medical)
+- Work is exploratory (don't know success criteria)
+- Team is small (can handle monitoring)
+
+**Choose Headless if:**
 - Privacy matters (sensitive data)
 - Economics matter (bootstrapped, high scale)
 - Control matters (need to modify behavior)
