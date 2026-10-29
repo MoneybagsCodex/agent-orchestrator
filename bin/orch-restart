@@ -1,11 +1,20 @@
 #!/bin/bash
 # Restart the agent-orchestrator server on port 3003. Usage: orch-restart
+# When the launchd job is loaded, launchd owns the process: kickstart it. Otherwise stop the listener and start one by hand.
 # Refuses to kill anything on the port that is not agent-orchestrator's own server.
 # The restart runs in a detached background shell, so it still completes if the caller is the process being restarted.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PORT=3003
 LOG="$ROOT/orchestrator.log"
+LABEL="com.joshuaminton.agent-orchestrator"
+UID_NUM=$(id -u)
+
+if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+  nohup bash -c "sleep 1; launchctl kickstart -k gui/$UID_NUM/$LABEL" >/dev/null 2>&1 < /dev/null &
+  echo "restart queued: launchd kickstart of $LABEL"
+  exit 0
+fi
 
 pid=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t 2>/dev/null | head -1)
 if [ -n "$pid" ]; then
